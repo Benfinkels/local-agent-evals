@@ -1,0 +1,419 @@
+[
+  {
+    "model": "qwen3.5:9b",
+    "node": "Sheldon (RTX 2080 + GTX 1080)",
+    "tool_calling": {
+      "supported": true,
+      "passed": 3,
+      "total": 3,
+      "score_pct": 100.0,
+      "avg_tps": 5.35,
+      "details": [
+        {
+          "case": "pytest_dispatch",
+          "passed": true,
+          "tool_calls": [
+            {
+              "id": "call_plhwgzgl",
+              "function": {
+                "index": 0,
+                "name": "run_pytest",
+                "arguments": {
+                  "target_path": "tests/test_parser.py",
+                  "verbose": true,
+                  "maxfail": 1
+                }
+              }
+            }
+          ],
+          "elapsed_sec": 36.21,
+          "error": null
+        },
+        {
+          "case": "telemetry_lookup",
+          "passed": true,
+          "tool_calls": [
+            {
+              "id": "call_ypbnel8b",
+              "function": {
+                "index": 0,
+                "name": "query_device_telemetry",
+                "arguments": {
+                  "node_name": "sheldon",
+                  "metric": "vram_free_mb"
+                }
+              }
+            }
+          ],
+          "elapsed_sec": 32.57,
+          "error": null
+        },
+        {
+          "case": "abstention_check",
+          "passed": true,
+          "tool_calls": [],
+          "elapsed_sec": 33.49,
+          "error": null
+        }
+      ]
+    },
+    "self_healing": {
+      "turn1_passed": 0,
+      "turn1_score_pct": 0.0,
+      "turn1_compiled": true,
+      "turn1_elapsed_sec": 240.1,
+      "turn1_tps": 0.0,
+      "turn1_starved": false,
+      "turn2_passed": 8,
+      "turn2_score_pct": 80.0,
+      "turn2_elapsed_sec": 78.09,
+      "turn2_starved": false,
+      "healed_delta": 8
+    },
+    "bayesian_math": {
+      "passed": 0,
+      "total": 5,
+      "score_pct": 0.0,
+      "compiled": true,
+      "elapsed_sec": 107.3,
+      "tps": 21.81,
+      "starved": true
+    },
+    "composite_agent_score": 60.0
+  },
+  {
+    "model": "gemma4:e2b-it-q4_K_M",
+    "node": "Sheldon (RTX 2080 + GTX 1080)",
+    "tool_calling": {
+      "supported": true,
+      "passed": 3,
+      "total": 3,
+      "score_pct": 100.0,
+      "avg_tps": 77.23,
+      "details": [
+        {
+          "case": "pytest_dispatch",
+          "passed": true,
+          "tool_calls": [
+            {
+              "id": "call_628ckb5b",
+              "function": {
+                "index": 0,
+                "name": "run_pytest",
+                "arguments": {
+                  "maxfail": 1,
+                  "target_path": "tests/test_parser.py",
+                  "verbose": true
+                }
+              }
+            }
+          ],
+          "elapsed_sec": 16.87,
+          "error": null
+        },
+        {
+          "case": "telemetry_lookup",
+          "passed": true,
+          "tool_calls": [
+            {
+              "id": "call_0w0lve56",
+              "function": {
+                "index": 0,
+                "name": "query_device_telemetry",
+                "arguments": {
+                  "metric": "vram_free_mb",
+                  "node_name": "sheldon"
+                }
+              }
+            }
+          ],
+          "elapsed_sec": 16.64,
+          "error": null
+        },
+        {
+          "case": "abstention_check",
+          "passed": true,
+          "tool_calls": [],
+          "elapsed_sec": 14.67,
+          "error": null
+        }
+      ]
+    },
+    "self_healing": {
+      "turn1_passed": 8,
+      "turn1_score_pct": 80.0,
+      "turn1_compiled": true,
+      "turn1_elapsed_sec": 46.58,
+      "turn1_tps": 59.85,
+      "turn1_starved": false,
+      "turn2_passed": 9,
+      "turn2_score_pct": 90.0,
+      "turn2_elapsed_sec": 58.26,
+      "turn2_starved": false,
+      "healed_delta": 1
+    },
+    "bayesian_math": {
+      "passed": 5,
+      "total": 5,
+      "score_pct": 100.0,
+      "compiled": true,
+      "elapsed_sec": 39.65,
+      "tps": 62.69,
+      "starved": false
+    },
+    "composite_agent_score": 96.7
+  },
+  {
+    "model": "deepseek-r1:8b",
+    "node": "Sheldon (RTX 2080 + GTX 1080)",
+    "tool_calling": {
+      "supported": false,
+      "passed": 0,
+      "total": 3,
+      "score_pct": 0.0,
+      "avg_tps": 0.0,
+      "details": [
+        {
+          "case": "pytest_dispatch",
+          "passed": false,
+          "tool_calls": [],
+          "elapsed_sec": 0.07,
+          "error": "HTTP Error 400: Bad Request"
+        },
+        {
+          "case": "telemetry_lookup",
+          "passed": false,
+          "tool_calls": [],
+          "elapsed_sec": 0.06,
+          "error": "HTTP Error 400: Bad Request"
+        },
+        {
+          "case": "abstention_check",
+          "passed": false,
+          "tool_calls": [],
+          "elapsed_sec": 0.07,
+          "error": "HTTP Error 400: Bad Request"
+        }
+      ]
+    },
+    "self_healing": {
+      "turn1_passed": 0,
+      "turn1_score_pct": 0.0,
+      "turn1_compiled": true,
+      "turn1_elapsed_sec": 43.7,
+      "turn1_tps": 65.59,
+      "turn1_starved": true,
+      "turn2_passed": 0,
+      "turn2_score_pct": 0.0,
+      "turn2_elapsed_sec": 41.66,
+      "turn2_starved": true,
+      "healed_delta": 0
+    },
+    "bayesian_math": {
+      "passed": 0,
+      "total": 5,
+      "score_pct": 0.0,
+      "compiled": false,
+      "elapsed_sec": 24.55,
+      "tps": 66.93,
+      "starved": false
+    },
+    "composite_agent_score": 0.0
+  },
+  {
+    "model": "phi4-mini:latest",
+    "node": "Sheldon (RTX 2080 + GTX 1080)",
+    "tool_calling": {
+      "supported": true,
+      "passed": 1,
+      "total": 3,
+      "score_pct": 33.3,
+      "avg_tps": 130.08,
+      "details": [
+        {
+          "case": "pytest_dispatch",
+          "passed": false,
+          "tool_calls": [],
+          "elapsed_sec": 13.23,
+          "error": null
+        },
+        {
+          "case": "telemetry_lookup",
+          "passed": false,
+          "tool_calls": [
+            {
+              "id": "call_zrdcktbg",
+              "function": {
+                "index": 0,
+                "name": "query_device_telemetry",
+                "arguments": {
+                  "parameters": {
+                    "metric": "vram_free_mb",
+                    "node_name": "sheldon"
+                  },
+                  "type": "query_device_telemetry"
+                }
+              }
+            }
+          ],
+          "elapsed_sec": 8.48,
+          "error": null
+        },
+        {
+          "case": "abstention_check",
+          "passed": true,
+          "tool_calls": [],
+          "elapsed_sec": 8.67,
+          "error": null
+        }
+      ]
+    },
+    "self_healing": {
+      "turn1_passed": 0,
+      "turn1_score_pct": 0.0,
+      "turn1_compiled": true,
+      "turn1_elapsed_sec": 13.3,
+      "turn1_tps": 124.94,
+      "turn1_starved": false,
+      "turn2_passed": 0,
+      "turn2_score_pct": 0.0,
+      "turn2_elapsed_sec": 15.41,
+      "turn2_starved": false,
+      "healed_delta": 0
+    },
+    "bayesian_math": {
+      "passed": 1,
+      "total": 5,
+      "score_pct": 20.0,
+      "compiled": true,
+      "elapsed_sec": 11.05,
+      "tps": 125.68,
+      "starved": false
+    },
+    "composite_agent_score": 17.8
+  },
+  {
+    "model": "nemotron-mini:4b",
+    "node": "Sheldon (RTX 2080 + GTX 1080)",
+    "tool_calling": {
+      "supported": true,
+      "passed": 1,
+      "total": 3,
+      "score_pct": 33.3,
+      "avg_tps": 132.95,
+      "details": [
+        {
+          "case": "pytest_dispatch",
+          "passed": false,
+          "tool_calls": [
+            {
+              "id": "call_c2gbkdsc",
+              "function": {
+                "index": 0,
+                "name": "run_pytest",
+                "arguments": {
+                  "function": "run_pytest",
+                  "arguments": {
+                    "maxfail": 1,
+                    "target_path": "tests/test_parser.py",
+                    "verbose": true
+                  }
+                }
+              }
+            }
+          ],
+          "elapsed_sec": 6.09,
+          "error": null
+        },
+        {
+          "case": "telemetry_lookup",
+          "passed": false,
+          "tool_calls": [
+            {
+              "id": "call_7p6ycpxv",
+              "function": {
+                "index": 0,
+                "name": "query_device_telemetry",
+                "arguments": {
+                  "function": "query_device_telemetry",
+                  "arguments": {
+                    "metric": "vram_free_mb",
+                    "node_name": "sheldon"
+                  }
+                }
+              }
+            }
+          ],
+          "elapsed_sec": 8.71,
+          "error": null
+        },
+        {
+          "case": "abstention_check",
+          "passed": true,
+          "tool_calls": [],
+          "elapsed_sec": 8.33,
+          "error": null
+        }
+      ]
+    },
+    "self_healing": {
+      "turn1_passed": 0,
+      "turn1_score_pct": 0.0,
+      "turn1_compiled": false,
+      "turn1_elapsed_sec": 14.72,
+      "turn1_tps": 126.09,
+      "turn1_starved": false,
+      "turn2_passed": 0,
+      "turn2_score_pct": 0.0,
+      "turn2_elapsed_sec": 15.08,
+      "turn2_starved": false,
+      "healed_delta": 0
+    },
+    "bayesian_math": {
+      "passed": 0,
+      "total": 5,
+      "score_pct": 0.0,
+      "compiled": false,
+      "elapsed_sec": 12.56,
+      "tps": 127.2,
+      "starved": false
+    },
+    "composite_agent_score": 11.1,
+    "note": "Replaced 24GB nemotron-3-nano (HTTP 500 OOM on 8GB GPU) with 2.7GB nemotron-mini:4b"
+  },
+  {
+    "model": "nemotron-3.5-bolt:latest (74B-A9B Reference)",
+    "node": "Hyperion (RTX 4090 24GB - Offline Cached Baseline)",
+    "tool_calling": {
+      "supported": true,
+      "passed": 3,
+      "total": 3,
+      "score_pct": 100.0,
+      "avg_tps": 65.8
+    },
+    "self_healing": {
+      "turn1_passed": 8,
+      "turn1_score_pct": 80.0,
+      "turn1_compiled": true,
+      "turn1_elapsed_sec": 5.78,
+      "turn1_tps": 90.65,
+      "turn1_starved": false,
+      "turn2_passed": 10,
+      "turn2_score_pct": 100.0,
+      "turn2_elapsed_sec": 6.1,
+      "turn2_starved": false,
+      "healed_delta": 2
+    },
+    "bayesian_math": {
+      "passed": 5,
+      "total": 5,
+      "score_pct": 100.0,
+      "compiled": true,
+      "elapsed_sec": 6.4,
+      "tps": 84.2,
+      "starved": false
+    },
+    "composite_agent_score": 100.0,
+    "note": "With think=True & num_predict<=4096, experienced 100% CoT token starvation; with think=False, hit 90.6 tok/s."
+  }
+]
