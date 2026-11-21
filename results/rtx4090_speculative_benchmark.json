@@ -1,0 +1,52 @@
+{
+  "speculative_benchmark": {
+    "draft_7_tps": 110.7,
+    "draft_0_tps": 80.52,
+    "speedup_pct": 37.5,
+    "draft_7_wall_sec": 17.739,
+    "draft_0_wall_sec": 23.352
+  },
+  "code_synthesis_eval": {
+    "tps": 106.62,
+    "tokens": 479,
+    "passed_tests": 9,
+    "total_tests": 10,
+    "pass_rate_pct": 90
+  },
+  "deep_reasoning_eval": {
+    "tps": 64.73,
+    "prompt_tps": 1188.22,
+    "eval_tokens": 3000,
+    "wall_sec": 46.807,
+    "thinking_chars": 13574,
+    "content_chars": 0
+  },
+  "json_extraction_eval": {
+    "valid": true,
+    "parsed": {
+      "device_name": "Sentry camera",
+      "ip_address": "192.0.2.10",
+      "action": "alert",
+      "trigger": "driveway movement",
+      "confidence_score": 1.0
+    },
+    "tps": 143.41,
+    "wall_sec": 0.808
+  },
+  "gpu_telemetry": {
+    "initial": {
+      "vram_used_mb": 23614.0,
+      "vram_total_mb": 24564.0,
+      "temp_c": 33.0,
+      "power_w": 5.26,
+      "util_percent": 0.0
+    },
+    "peak_during_benchmarks": {
+      "vram_used_mb": 23502.0,
+      "vram_total_mb": 24564.0,
+      "temp_c": 38.0,
+      "power_w": 44.86,
+      "util_percent": 78.0
+    }
+  }
+}

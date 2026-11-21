@@ -1,0 +1,113 @@
+[
+  {
+    "task": "Task 1: Concurrency & Deadlock Audit",
+    "task_id": "task1_concurrency",
+    "regime": "Zero Thinking (think=False, temp=0.2)",
+    "regime_id": "regime_zero",
+    "think_enabled": false,
+    "total_time_sec": 35.124,
+    "eval_tokens": 1561,
+    "tps": 62.49,
+    "thinking_chars": 0,
+    "response_chars": 6990
+  },
+  {
+    "task": "Task 1: Concurrency & Deadlock Audit",
+    "task_id": "task1_concurrency",
+    "regime": "Budget-Constrained Thinking (~150 words budget, temp=1.0)",
+    "regime_id": "regime_budgeted",
+    "think_enabled": true,
+    "total_time_sec": 54.011,
+    "eval_tokens": 3000,
+    "tps": 56.16,
+    "thinking_chars": 13362,
+    "response_chars": 0
+  },
+  {
+    "task": "Task 1: Concurrency & Deadlock Audit",
+    "task_id": "task1_concurrency",
+    "regime": "Deep Unconstrained Thinking (think=True, temp=1.0)",
+    "regime_id": "regime_deep",
+    "think_enabled": true,
+    "total_time_sec": 74.664,
+    "eval_tokens": 4096,
+    "tps": 55.31,
+    "thinking_chars": 18715,
+    "response_chars": 0
+  },
+  {
+    "task": "Task 2: Inverted Index Algorithmic Refactor",
+    "task_id": "task2_indexer",
+    "regime": "Zero Thinking (think=False, temp=0.2)",
+    "regime_id": "regime_zero",
+    "think_enabled": false,
+    "total_time_sec": 33.031,
+    "eval_tokens": 2500,
+    "tps": 76.86,
+    "thinking_chars": 0,
+    "response_chars": 11669,
+    "compiled": false
+  },
+  {
+    "task": "Task 2: Inverted Index Algorithmic Refactor",
+    "task_id": "task2_indexer",
+    "regime": "Budget-Constrained Thinking (~150 words budget, temp=1.0)",
+    "regime_id": "regime_budgeted",
+    "think_enabled": true,
+    "total_time_sec": 48.075,
+    "eval_tokens": 3000,
+    "tps": 63.12,
+    "thinking_chars": 12355,
+    "response_chars": 0,
+    "compiled": true
+  },
+  {
+    "task": "Task 2: Inverted Index Algorithmic Refactor",
+    "task_id": "task2_indexer",
+    "regime": "Deep Unconstrained Thinking (think=True, temp=1.0)",
+    "regime_id": "regime_deep",
+    "think_enabled": true,
+    "total_time_sec": 60.223,
+    "eval_tokens": 4096,
+    "tps": 68.62,
+    "thinking_chars": 17445,
+    "response_chars": 0,
+    "compiled": true
+  },
+  {
+    "task": "Task 3: Hardware Parser with 10 Unit Tests",
+    "task_id": "task3_parser",
+    "regime": "Zero Thinking (think=False, temp=0.2)",
+    "regime_id": "regime_zero",
+    "think_enabled": false,
+    "total_time_sec": 5.779,
+    "eval_tokens": 471,
+    "tps": 90.65,
+    "thinking_chars": 0,
+    "response_chars": 1607
+  },
+  {
+    "task": "Task 3: Hardware Parser with 10 Unit Tests",
+    "task_id": "task3_parser",
+    "regime": "Budget-Constrained Thinking (~150 words budget, temp=1.0)",
+    "regime_id": "regime_budgeted",
+    "think_enabled": true,
+    "total_time_sec": 50.654,
+    "eval_tokens": 3000,
+    "tps": 59.92,
+    "thinking_chars": 10130,
+    "response_chars": 0
+  },
+  {
+    "task": "Task 3: Hardware Parser with 10 Unit Tests",
+    "task_id": "task3_parser",
+    "regime": "Deep Unconstrained Thinking (think=True, temp=1.0)",
+    "regime_id": "regime_deep",
+    "think_enabled": true,
+    "total_time_sec": 64.105,
+    "eval_tokens": 4096,
+    "tps": 64.19,
+    "thinking_chars": 13491,
+    "response_chars": 0
+  }
+]

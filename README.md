@@ -29,6 +29,8 @@ Most LLM benchmarks measure single-turn chat fluency or static multiple-choice r
 
 ## Empirical Scorecard (October 2026 Hardware Run)
 
+![Local Agentic Benchmark Scorecard](docs/charts/model_scorecard.png)
+
 Evaluated across two local hardware tiers:
 * **Edge / Server Node (`Sheldon`):** Dual 8GB GPUs (NVIDIA RTX 2080 8GB + GTX 1080 8GB)
 * **Workstation Baseline (`Hyperion`):** NVIDIA RTX 4090 (24GB VRAM)
@@ -95,3 +97,29 @@ Instead of routing every coding/agent prompt to a cloud model, `run_verify_then_
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Tier 0 Standalone (`Gemma 4 e2B` Local)** | 100.0% (3/3) | 90.0% (9/10) | 100.0% (4/4) | 100.0% (3/3) | **97.5%** | **100.0% ($0)** |
 | **Tier 0 $\rightarrow$ Tier 1 Cascade (`Gemma 4` + `MiniMax-M2.7`)** | **100.0% (3/3)** | **100.0% (10/10)** | **100.0% (4/4)** | **100.0% (3/3)** | **100.0%** | **95.0% (19/20 local)** |
+
+---
+
+## 5. Phase 3: Thinking-Budget Starvation & RTX 4090 Speculative Decoding
+
+### Track 6: Prompt-Based Thinking Budgets Still Starve Final Output (`results/thinking_budget_eval.json`)
+
+![Empirical CoT Token Starvation](docs/charts/thinking_starvation.png)
+
+Testing three reasoning regimes across three engineering tasks (`Concurrency Audit`, `Inverted Index Refactor`, `Hardware Parser`) exposed two critical production failure modes:
+
+| Regime | Token Cap | Tasks Emitting Final Output | Hidden `<think>` Chars | Usable Output Chars | Wall Time Range |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Zero Thinking (`think=False`)** | `2,500` | **3 / 3 (100%)** | `0` | `1,607 – 11,669` | **`5.8 – 35.1 s`** |
+| **Prompt-Budgeted (`~150w` instruction)** | `3,000` | **0 / 3 (0% — Starved)** | `10,130 – 13,362` | **`0`** | `48.1 – 54.0 s` |
+| **Deep Unconstrained (`think=True`)** | `4,096` | **0 / 3 (0% — Starved)** | `13,491 – 18,715` | **`0`** | `60.2 – 74.7 s` |
+
+* **Key Finding 1:** Soft prompt instructions (*"keep thinking under ~150 words"*) do **not** reliably constrain reasoning models — `6/6` thinking-enabled runs burned 100% of `num_predict` inside `<think>` and emitted **zero characters of final response**.
+* **Key Finding 2 (Eval Pitfall):** On `task2_indexer`, `py_compile` reported `compiled=True` for the starved `0`-byte Python file because an empty file has no syntax errors — highlighting why harnesses must assert non-empty output *and* functional unit-test pass rates rather than compile checks alone.
+
+### Speculative Decoding & Task Throughput on RTX 4090 (`results/rtx4090_speculative_benchmark.json`)
+
+![RTX 4090 Speculative Decoding and Task Throughput](docs/charts/speculative_4090.png)
+
+* **Speculative Decoding (`draft=7` vs. `draft=0`):** Increased sustained generation speed by **+37.5%** (`80.5 -> 110.7 tok/s`), cutting wall-clock time from `23.4s` to `17.7s` at `23.5 GB` VRAM and `45W` peak GPU draw.
+* **Reproducing Charts:** All PNGs in `docs/charts/` are generated deterministically from the committed JSON artifacts via `python scripts/generate_charts.py`.

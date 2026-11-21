@@ -169,3 +169,29 @@ def test_verify_then_escalate_cascade_escalates_on_tier0_failure():
     assert res["passed"] is True
     assert res["escalated_to_tier1"] is True
     assert res["selected_tier"] == "tier1_worker_minimax"
+
+
+def test_phase3_benchmark_artifacts_and_hygiene():
+    import re
+
+    results_dir = Path(__file__).parent.parent / "results"
+    think_path = results_dir / "thinking_budget_eval.json"
+    spec_path = results_dir / "rtx4090_speculative_benchmark.json"
+
+    assert think_path.exists() and spec_path.exists()
+
+    think_raw = think_path.read_text(encoding="utf-8")
+    spec_raw = spec_path.read_text(encoding="utf-8")
+
+    # Guard against leaking RFC-1918 LAN IPs into public benchmark artifacts
+    private_ip = re.compile(r"\b(?:192\.168|10\.\d{1,3})\.\d{1,3}\.\d{1,3}\b")
+    assert not private_ip.search(think_raw)
+    assert not private_ip.search(spec_raw)
+
+    think_rows = json.loads(think_raw)
+    assert len(think_rows) == 9
+    starved = [r for r in think_rows if r["think_enabled"] and r["response_chars"] == 0]
+    assert len(starved) == 6
+
+    spec_data = json.loads(spec_raw)
+    assert spec_data["speculative_benchmark"]["speedup_pct"] > 30.0
