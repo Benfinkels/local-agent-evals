@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Sheldon Local Agentic LLM Benchmark Suite (2026)
-Evaluates local SLMs (4B-9B class) on:
+Local Agentic LLM Benchmark Suite
+Evaluates local Ollama models on:
 1. Native Tool-Calling Precision & Abstention (/api/chat tools API)
-2. Multi-Turn Self-Healing Code Generation (Turn 1 -> Pytest/Unittest Traceback -> Turn 2 Patch)
-3. Deterministic Applied Math & Bayesian Verification (Unit-test graded)
+2. Multi-Turn Self-Healing Code Generation (Turn 1 -> unittest traceback -> Turn 2 Patch)
+3. Deterministic Applied Math & Bayesian Verification (unit-test graded)
 4. Thinking Token Efficiency & Runaway CoT Starvation Rate
 """
 
+import argparse
+from datetime import datetime
 import json
 import math
 import os
@@ -15,36 +17,45 @@ import py_compile
 import re
 import subprocess
 import sys
+import tempfile
 import time
+from typing import Optional
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-OLLAMA_BASE = "http://localhost:11434"
-BASE_DIR = Path.home() / "projects" / "local-agent-evals"
+BASE_DIR = Path(__file__).resolve().parent.parent
 RESULTS_DIR = BASE_DIR / "results"
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def ensure_nemotron_model() -> str:
-    """Ensure a Nemotron edge model is available on Sheldon."""
-    out = subprocess.run(["ollama", "list"], capture_output=True, text=True).stdout
-    for candidate in ["nemotron-3-nano", "nemotron-mini:4b", "nemotron-mini"]:
-        if candidate in out:
-            for line in out.splitlines():
-                if candidate in line:
-                    return line.split()[0]
-
-    for tag in ["nemotron-3-nano", "nemotron-mini:4b"]:
-        print(f"[*] Attempting to pull {tag} on Sheldon...")
-        res = subprocess.run(["ollama", "pull", tag], capture_output=True, text=True)
-        if res.returncode == 0:
-            print(f"[+] Successfully pulled {tag}")
-            return tag
-    return ""
+def normalize_ollama_url(url: Optional[str] = None) -> str:
+    raw = (url or os.environ.get("OLLAMA_HOST") or "http://localhost:11434").strip()
+    if not raw.startswith(("http://", "https://")):
+        raw = f"http://{raw}"
+    return raw.rstrip("/")
 
 
-def ollama_chat(model: str, messages: list, tools: list = None, options: dict = None, timeout: int = 240) -> dict:
+OLLAMA_BASE = normalize_ollama_url()
+
+
+def list_local_ollama_models(base_url: Optional[str] = None) -> list[str]:
+    """Return locally installed Ollama model names without pulling anything."""
+    url = f"{normalize_ollama_url(base_url or OLLAMA_BASE)}/api/tags"
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return [m["name"] for m in data.get("models", []) if m.get("name")]
+
+
+def ollama_chat(
+    model: str,
+    messages: list,
+    tools: list = None,
+    options: dict = None,
+    timeout: int = 240,
+    think: Optional[bool] = None,
+    base_url: Optional[str] = None,
+) -> dict:
     payload = {
         "model": model,
         "messages": messages,
@@ -53,9 +64,12 @@ def ollama_chat(model: str, messages: list, tools: list = None, options: dict = 
     }
     if tools:
         payload["tools"] = tools
+    if think is not None:
+        payload["think"] = think
 
+    endpoint = f"{normalize_ollama_url(base_url or OLLAMA_BASE)}/api/chat"
     req = urllib.request.Request(
-        f"{OLLAMA_BASE}/api/chat",
+        endpoint,
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
     )
@@ -143,7 +157,11 @@ AGENT_TOOLS = [
 ]
 
 
-def eval_tool_calling(model: str) -> dict:
+def eval_tool_calling(
+    model: str,
+    think: Optional[bool] = None,
+    base_url: Optional[str] = None,
+) -> dict:
     cases = [
         {
             "id": "pytest_dispatch",
@@ -175,6 +193,8 @@ def eval_tool_calling(model: str) -> dict:
             messages=[{"role": "user", "content": c["prompt"]}],
             tools=AGENT_TOOLS,
             options={"temperature": 0.0, "num_predict": 512, "num_ctx": 4096},
+            think=think,
+            base_url=base_url,
         )
         if res["tps"] > 0:
             total_tps.append(res["tps"])
@@ -194,8 +214,11 @@ def eval_tool_calling(model: str) -> dict:
                         fargs = json.loads(fargs)
                     except Exception:
                         fargs = {}
-                if fname == c["expect_tool"] and c["check_args"](fargs):
-                    success = True
+                try:
+                    if isinstance(fargs, dict) and fname == c["expect_tool"] and c["check_args"](fargs):
+                        success = True
+                except (TypeError, ValueError):
+                    success = False
 
         if success:
             passed += 1
@@ -287,38 +310,64 @@ def extract_code(text: str) -> str:
 
 
 def run_code_tests(code_str: str, test_suite: str, total_tests: int, tag: str) -> dict:
-    test_file = RESULTS_DIR / f"tmp_test_{tag}.py"
-    test_file.write_text(f"{code_str}\n\n{test_suite}", encoding="utf-8")
-    try:
-        py_compile.compile(str(test_file), doraise=True)
-    except Exception as e:
-        return {"compiled": False, "passed": 0, "total": total_tests, "score_pct": 0.0, "trace": str(e)}
+    with tempfile.TemporaryDirectory(prefix="local_agent_evals_") as tmp_dir:
+        test_file = Path(tmp_dir) / f"tmp_test_{tag}.py"
+        test_file.write_text(f"{code_str}\n\n{test_suite}", encoding="utf-8")
+        try:
+            py_compile.compile(str(test_file), doraise=True)
+        except Exception as e:
+            return {"compiled": False, "passed": 0, "total": total_tests, "score_pct": 0.0, "trace": str(e)}
 
-    proc = subprocess.run([sys.executable, str(test_file)], capture_output=True, text=True, timeout=15)
-    out = proc.stderr
-    if proc.returncode == 0:
-        return {"compiled": True, "passed": total_tests, "total": total_tests, "score_pct": 100.0, "trace": "OK"}
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(test_file)],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "compiled": True,
+                "passed": 0,
+                "total": total_tests,
+                "score_pct": 0.0,
+                "trace": "Execution timed out after 15s",
+            }
 
-    fail_m = re.findall(r"FAILED \((?:failures=(\d+))?(?:, )?(?:errors=(\d+))?\)", out)
-    failures = int(fail_m[0][0]) if (fail_m and fail_m[0][0]) else 0
-    errors = int(fail_m[0][1]) if (fail_m and fail_m[0][1]) else 0
-    if not fail_m:
-        passed = 0
-    else:
-        passed = max(0, total_tests - failures - errors)
-    return {
-        "compiled": True,
-        "passed": passed,
-        "total": total_tests,
-        "score_pct": round((passed / total_tests) * 100, 1),
-        "trace": out[-1500:],
-    }
+        out = proc.stderr
+        if proc.returncode == 0:
+            return {"compiled": True, "passed": total_tests, "total": total_tests, "score_pct": 100.0, "trace": "OK"}
+
+        fail_m = re.findall(r"FAILED \((?:failures=(\d+))?(?:, )?(?:errors=(\d+))?\)", out)
+        failures = int(fail_m[0][0]) if (fail_m and fail_m[0][0]) else 0
+        errors = int(fail_m[0][1]) if (fail_m and fail_m[0][1]) else 0
+        if not fail_m:
+            passed = 0
+        else:
+            passed = max(0, total_tests - failures - errors)
+        return {
+            "compiled": True,
+            "passed": passed,
+            "total": total_tests,
+            "score_pct": round((passed / total_tests) * 100, 1),
+            "trace": out[-1500:],
+        }
 
 
-def eval_self_healing_code(model: str) -> dict:
+def eval_self_healing_code(
+    model: str,
+    think: Optional[bool] = None,
+    base_url: Optional[str] = None,
+) -> dict:
     safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", model)
     messages = [{"role": "user", "content": PARSER_PROMPT}]
-    t1 = ollama_chat(model, messages, options={"temperature": 0.2, "num_predict": 2048, "num_ctx": 8192})
+    t1 = ollama_chat(
+        model,
+        messages,
+        options={"temperature": 0.2, "num_predict": 2048, "num_ctx": 8192},
+        think=think,
+        base_url=base_url,
+    )
     c1 = extract_code(t1["content"])
     r1 = run_code_tests(c1, PARSER_UNITTESTS, 10, f"{safe_name}_t1")
 
@@ -331,7 +380,13 @@ def eval_self_healing_code(model: str) -> dict:
         )
         messages.append({"role": "assistant", "content": t1["content"] or "```python\n# empty\n```"})
         messages.append({"role": "user", "content": feedback})
-        t2 = ollama_chat(model, messages, options={"temperature": 0.2, "num_predict": 2048, "num_ctx": 8192})
+        t2 = ollama_chat(
+            model,
+            messages,
+            options={"temperature": 0.2, "num_predict": 2048, "num_ctx": 8192},
+            think=think,
+            base_url=base_url,
+        )
         c2 = extract_code(t2["content"])
         r2 = run_code_tests(c2, PARSER_UNITTESTS, 10, f"{safe_name}_t2")
         t2_elapsed = t2["elapsed_sec"]
@@ -424,10 +479,20 @@ if __name__ == '__main__':
 """
 
 
-def eval_math_verification(model: str) -> dict:
+def eval_math_verification(
+    model: str,
+    think: Optional[bool] = None,
+    base_url: Optional[str] = None,
+) -> dict:
     safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", model)
     messages = [{"role": "user", "content": MATH_PROMPT}]
-    t1 = ollama_chat(model, messages, options={"temperature": 0.1, "num_predict": 2048, "num_ctx": 8192})
+    t1 = ollama_chat(
+        model,
+        messages,
+        options={"temperature": 0.1, "num_predict": 2048, "num_ctx": 8192},
+        think=think,
+        base_url=base_url,
+    )
     code = extract_code(t1["content"])
     r1 = run_code_tests(code, MATH_UNITTESTS, 5, f"{safe_name}_math")
     return {
@@ -441,72 +506,118 @@ def eval_math_verification(model: str) -> dict:
     }
 
 
-def main():
-    print("=" * 72)
-    print("SHELDON AGENTIC & VERIFICATION BENCHMARK SUITE (2026)")
-    print("=" * 72)
+def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="python -m evals.runner",
+        description="Run deterministic agentic benchmarks against any local Ollama model.",
+    )
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        help="One or more Ollama model tags to evaluate (e.g. --models gemma4:e2b qwen3.5:9b). "
+        "If omitted, evaluates all currently installed local Ollama models (never auto-pulls).",
+    )
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="Ollama base URL (default: $OLLAMA_HOST or http://localhost:11434).",
+    )
+    parser.add_argument(
+        "--think",
+        choices=["auto", "true", "false"],
+        default="auto",
+        help="Control Ollama's `think` parameter (default: auto = omit parameter).",
+    )
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="Path to write JSON results (default: results/run_<timestamp>.json).",
+    )
+    parser.add_argument(
+        "--list-models",
+        action="store_true",
+        help="List locally installed Ollama models and exit.",
+    )
+    return parser.parse_args(argv)
 
-    nemotron_tag = ensure_nemotron_model()
 
-    models = [
-        "qwen3.5:9b",
-        "gemma4:e2b-it-q4_K_M",
-        "deepseek-r1:8b",
-        "phi4-mini:latest",
+def format_markdown_table(summary: list[dict]) -> str:
+    lines = [
+        "| Model | Track 1: Tool Calling | Track 2: Self-Healing (T1 -> T2) | Track 3: Bayesian Math | CoT Starved? | Composite |",
+        "| :--- | :---: | :---: | :---: | :---: | :---: |",
     ]
-    if nemotron_tag and nemotron_tag not in models:
-        models.append(nemotron_tag)
+    for row in summary:
+        tc = row["tool_calling"]
+        sh = row["self_healing"]
+        mv = row["bayesian_math"]
+        starved = "Yes" if (sh["turn1_starved"] or sh["turn2_starved"] or mv["starved"]) else "No"
+        lines.append(
+            f"| `{row['model']}` | {tc['passed']}/{tc['total']} ({tc['score_pct']}%) | "
+            f"{sh['turn1_passed']}/10 -> {sh['turn2_passed']}/10 (+{sh['healed_delta']}) | "
+            f"{mv['passed']}/{mv['total']} ({mv['score_pct']}%) | {starved} | **{row['composite_agent_score']}%** |"
+        )
+    return "\n".join(lines)
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    args = parse_args(argv)
+    base_url = normalize_ollama_url(args.base_url)
+    think_flag = None if args.think == "auto" else (args.think == "true")
+
+    if args.list_models:
+        models = list_local_ollama_models(base_url)
+        print(f"Installed Ollama models at {base_url}:")
+        for m in models:
+            print(f"  - {m}")
+        return 0
+
+    models = args.models
+    if not models:
+        try:
+            models = list_local_ollama_models(base_url)
+        except Exception as e:
+            print(f"[!] Could not reach Ollama at {base_url}: {e}", file=sys.stderr)
+            print("    Start Ollama or pass --base-url http://<host>:11434 --models <tag>", file=sys.stderr)
+            return 1
+        if not models:
+            print(f"[!] No models found at {base_url}. Pull one first (e.g. `ollama pull gemma4:e2b`).", file=sys.stderr)
+            return 1
+
+    print("=" * 72)
+    print(f"LOCAL AGENTIC BENCHMARK SUITE | endpoint={base_url} | think={args.think}")
+    print("=" * 72)
 
     summary = []
     for m in models:
         print(f"\n>>> Benchmarking Model: {m}")
-        tc = eval_tool_calling(m)
+        tc = eval_tool_calling(m, think=think_flag, base_url=base_url)
         print(f"  [Track 1 - Tool Calling]  Score: {tc['passed']}/{tc['total']} ({tc['score_pct']}%) | Supported: {tc['supported']}")
 
-        sh = eval_self_healing_code(m)
+        sh = eval_self_healing_code(m, think=think_flag, base_url=base_url)
         print(f"  [Track 2 - Self-Healing]  Turn 1: {sh['turn1_passed']}/10 -> Turn 2: {sh['turn2_passed']}/10 (Delta: +{sh['healed_delta']}) | TPS: {sh['turn1_tps']}")
 
-        mv = eval_math_verification(m)
+        mv = eval_math_verification(m, think=think_flag, base_url=base_url)
         print(f"  [Track 3 - Bayesian Math] Score: {mv['passed']}/5 ({mv['score_pct']}%) | TPS: {mv['tps']}")
 
         composite = round((tc["score_pct"] + sh["turn2_score_pct"] + mv["score_pct"]) / 3.0, 1)
         summary.append({
             "model": m,
-            "node": "Sheldon (RTX 2080 + GTX 1080)",
+            "endpoint": base_url,
+            "think": args.think,
             "tool_calling": tc,
             "self_healing": sh,
             "bayesian_math": mv,
             "composite_agent_score": composite,
         })
 
-    # Include Hyperion reference baseline from saved run
-    hyperion_ref = {
-        "model": "nemotron-3.5-bolt:latest (74B-A9B Reference)",
-        "node": "Hyperion (RTX 4090 24GB - Offline Cached Baseline)",
-        "tool_calling": {"supported": True, "passed": 3, "total": 3, "score_pct": 100.0, "avg_tps": 65.8},
-        "self_healing": {
-            "turn1_passed": 8,
-            "turn1_score_pct": 80.0,
-            "turn1_compiled": True,
-            "turn1_elapsed_sec": 5.78,
-            "turn1_tps": 90.65,
-            "turn1_starved": False,
-            "turn2_passed": 10,
-            "turn2_score_pct": 100.0,
-            "turn2_elapsed_sec": 6.1,
-            "turn2_starved": False,
-            "healed_delta": 2,
-        },
-        "bayesian_math": {"passed": 5, "total": 5, "score_pct": 100.0, "compiled": True, "elapsed_sec": 6.4, "tps": 84.2, "starved": False},
-        "composite_agent_score": 100.0,
-        "note": "With think=True & num_predict<=4096, experienced 100% CoT token starvation; with think=False, hit 90.6 tok/s.",
-    }
-    summary.append(hyperion_ref)
-
-    out_path = RESULTS_DIR / "benchmark_summary.json"
+    out_path = Path(args.output) if args.output else (RESULTS_DIR / f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    print(f"\n[+] Saved full benchmark results to {out_path}")
+
+    print("\n" + format_markdown_table(summary))
+    print(f"\n[+] Saved benchmark results to {out_path}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

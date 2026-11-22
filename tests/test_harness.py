@@ -23,7 +23,7 @@ def test_extract_code_strips_markdown():
 
 
 def test_hardware_parser_verifier_passes_reference_solution():
-    ref_code = """
+    ref_code = r"""
 import re
 from typing import Optional
 
@@ -195,3 +195,62 @@ def test_phase3_benchmark_artifacts_and_hygiene():
 
     spec_data = json.loads(spec_raw)
     assert spec_data["speculative_benchmark"]["speedup_pct"] > 30.0
+
+
+def test_runner_cli_and_ollama_url_normalization(monkeypatch):
+    from evals.runner import format_markdown_table, normalize_ollama_url, parse_args
+
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    assert normalize_ollama_url() == "http://localhost:11434"
+    assert normalize_ollama_url("127.0.0.1:11434/") == "http://127.0.0.1:11434"
+
+    monkeypatch.setenv("OLLAMA_HOST", "http://192.0.2.10:11434/")
+    assert normalize_ollama_url() == "http://192.0.2.10:11434"
+
+    args = parse_args(["--models", "gemma4:e2b", "qwen3.5:9b", "--think", "false", "--base-url", "http://localhost:11435"])
+    assert args.models == ["gemma4:e2b", "qwen3.5:9b"]
+    assert args.think == "false"
+    assert args.base_url == "http://localhost:11435"
+
+    md = format_markdown_table([{
+        "model": "gemma4:e2b",
+        "tool_calling": {"passed": 3, "total": 3, "score_pct": 100.0},
+        "self_healing": {"turn1_passed": 8, "turn2_passed": 9, "healed_delta": 1, "turn1_starved": False, "turn2_starved": False},
+        "bayesian_math": {"passed": 5, "total": 5, "score_pct": 100.0, "starved": False},
+        "composite_agent_score": 96.7,
+    }])
+    assert "`gemma4:e2b`" in md and "**96.7%**" in md
+
+
+def test_ollama_chat_passes_think_flag_when_set():
+    from unittest.mock import MagicMock, patch
+    from evals.runner import ollama_chat
+
+    captured = {}
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({
+                "message": {"content": "ok"},
+                "eval_count": 5,
+                "eval_duration": 100_000_000,
+            }).encode("utf-8")
+
+    def fake_urlopen(req, timeout=0):
+        captured["url"] = req.full_url
+        captured["payload"] = json.loads(req.data.decode("utf-8"))
+        return FakeResp()
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        res = ollama_chat("gemma4:e2b", [{"role": "user", "content": "hi"}], think=False, base_url="http://localhost:11435")
+
+    assert res["ok"] is True
+    assert captured["url"] == "http://localhost:11435/api/chat"
+    assert captured["payload"]["think"] is False
+
