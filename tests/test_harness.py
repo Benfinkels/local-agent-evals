@@ -254,3 +254,35 @@ def test_ollama_chat_passes_think_flag_when_set():
     assert captured["url"] == "http://localhost:11435/api/chat"
     assert captured["payload"]["think"] is False
 
+
+def test_eval_tool_calling_10_cases_and_offload_verdict():
+    from unittest.mock import patch
+    from evals.runner import classify_offload_readiness, eval_tool_calling
+
+    responses = iter([
+        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "run_pytest", "arguments": {"target_path": "tests/test_parser.py", "maxfail": 1, "verbose": True}}}]},
+        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "query_device_telemetry", "arguments": {"node_name": "edge-gpu", "metric": "vram_free_mb"}}}]},
+        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "log_crm_interaction", "arguments": {"contact_name": "Sarah Chen", "channel": "phone", "summary": "Discussed Q4 board budget", "follow_up_days": 7}}}]},
+        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "dispatch_alert", "arguments": {"severity": "critical", "title": "Driveway motion after midnight", "tags": ["camera", "perimeter"], "suppress_if_quiet_hours": False}}}]},
+        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "schedule_power_action", "arguments": {"node_name": "edge-gpu", "action": "sleep", "delay_seconds": 30, "reason": "Nightly backup finished"}}}]},
+        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "HTTP 429 means Too Many Requests (rate limit exceeded).", "tool_calls": []},
+        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "Check GPU temperature first before rebooting.", "tool_calls": []},
+        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "Which channel did you use and how many days until follow-up?", "tool_calls": []},
+        # Case 09 (2-step chain: step 1 telemetry -> step 2 alert)
+        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "query_device_telemetry", "arguments": {"node_name": "workstation", "metric": "gpu_temp"}}}]},
+        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "dispatch_alert", "arguments": {"severity": "critical", "title": "Workstation GPU overheating at 92C", "tags": ["thermal"], "suppress_if_quiet_hours": False}}}]},
+        # Case 10 (validator error self-repair)
+        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "log_crm_interaction", "arguments": {"contact_name": "Marcus Vance", "channel": "linkedin", "summary": "Keynote invite", "follow_up_days": 5}}}]},
+    ])
+
+    with patch("evals.runner.ollama_chat", side_effect=lambda *a, **kw: next(responses)):
+        tc = eval_tool_calling("mock-model")
+
+    assert tc["total"] == 10
+    assert tc["passed"] == 10
+    assert tc["score_pct"] == 100.0
+    assert classify_offload_readiness(tc, {"turn1_starved": False, "turn2_starved": False}, {"starved": False}, 96.7) == "Unattended Ready"
+    assert classify_offload_readiness({"score_pct": 80.0, "starved": False}, {"turn1_starved": False, "turn2_starved": False}, {"starved": False}, 75.0) == "Validator + Retry"
+    assert classify_offload_readiness({"score_pct": 60.0, "starved": False}, {"turn1_starved": False, "turn2_starved": False}, {"starved": False}, 70.0) == "Net Frontier Tax"
+
+

@@ -55,12 +55,14 @@ def ollama_chat(
     timeout: int = 240,
     think: Optional[bool] = None,
     base_url: Optional[str] = None,
+    keep_alive: str = "5m",
 ) -> dict:
     payload = {
         "model": model,
         "messages": messages,
         "stream": False,
-        "options": options or {"temperature": 0.2, "num_predict": 2048, "num_ctx": 8192},
+        "keep_alive": keep_alive,
+        "options": options or {"temperature": 0.2, "num_predict": 2048, "num_ctx": 4096},
     }
     if tools:
         payload["tools"] = tools
@@ -68,15 +70,29 @@ def ollama_chat(
         payload["think"] = think
 
     endpoint = f"{normalize_ollama_url(base_url or OLLAMA_BASE)}/api/chat"
-    req = urllib.request.Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-    )
     t0 = time.perf_counter()
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        try:
+            req = urllib.request.Request(
+                endpoint,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as he:
+            err_body = he.read().decode("utf-8", errors="replace")
+            if he.code == 400 and "think" in payload and "think" in err_body.lower():
+                payload.pop("think", None)
+                req = urllib.request.Request(
+                    endpoint,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+            else:
+                raise RuntimeError(f"HTTP {he.code}: {err_body[:200]}") from he
         elapsed = time.perf_counter() - t0
         msg = data.get("message", {})
         content = msg.get("content", "") or ""
@@ -120,7 +136,7 @@ def ollama_chat(
 
 
 # ============================================================================
-# TRACK 1: NATIVE TOOL CALLING & ABSTENTION PRECISION
+# TRACK 1: AUTONOMOUS TOOL CALLING, STRICT SCHEMAS & ZERO-FRONTIER CHAINS (10)
 # ============================================================================
 AGENT_TOOLS = [
     {
@@ -147,37 +163,180 @@ AGENT_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "node_name": {"type": "string", "enum": ["sheldon", "hyperion", "sentry"]},
+                    "node_name": {"type": "string", "enum": ["edge-gpu", "workstation", "sentry"]},
                     "metric": {"type": "string", "enum": ["gpu_temp", "vram_free_mb", "power_watts"]},
                 },
                 "required": ["node_name", "metric"],
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "log_crm_interaction",
+            "description": "Record a structured contact interaction and follow-up interval in the CRM.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "contact_name": {"type": "string", "description": "Full name of the contact"},
+                    "channel": {"type": "string", "enum": ["email", "linkedin", "phone", "in_person"]},
+                    "summary": {"type": "string", "description": "Short summary of the interaction"},
+                    "follow_up_days": {"type": "integer", "description": "Days until next follow-up"},
+                },
+                "required": ["contact_name", "channel", "summary", "follow_up_days"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "dispatch_alert",
+            "description": "Send a structured alert notification with tags and quiet-hours handling.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "severity": {"type": "string", "enum": ["info", "warning", "critical"]},
+                    "title": {"type": "string", "description": "Concise alert title"},
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of lowercase category tags",
+                    },
+                    "suppress_if_quiet_hours": {
+                        "type": "boolean",
+                        "description": "Whether to suppress notification during quiet hours",
+                    },
+                },
+                "required": ["severity", "title", "tags", "suppress_if_quiet_hours"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "schedule_power_action",
+            "description": "Schedule a sleep, reboot, or poweroff action on a compute node.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "node_name": {"type": "string", "enum": ["edge-gpu", "workstation"]},
+                    "action": {"type": "string", "enum": ["sleep", "reboot", "poweroff"]},
+                    "delay_seconds": {"type": "integer", "description": "Delay in seconds before action"},
+                    "reason": {"type": "string", "description": "Short reason for the power action"},
+                },
+                "required": ["node_name", "action", "delay_seconds", "reason"],
+            },
+        },
+    },
 ]
+
+
+def _extract_first_tool_call(tcalls: list) -> tuple[Optional[str], Optional[dict]]:
+    if not tcalls:
+        return None, None
+    fn = tcalls[0].get("function", {})
+    fname = fn.get("name")
+    fargs = fn.get("arguments", {})
+    if isinstance(fargs, str):
+        try:
+            fargs = json.loads(fargs)
+        except Exception:
+            return fname, None
+    return fname, fargs if isinstance(fargs, dict) else None
+
+
+def _is_strict_int(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
 
 
 def eval_tool_calling(
     model: str,
     think: Optional[bool] = None,
     base_url: Optional[str] = None,
+    num_ctx: int = 4096,
 ) -> dict:
-    cases = [
+    opts = {"temperature": 0.0, "num_predict": 512, "num_ctx": num_ctx}
+    single_turn_cases = [
         {
-            "id": "pytest_dispatch",
+            "id": "01_pytest_strict_types",
             "prompt": "Run pytest on 'tests/test_parser.py' with verbose enabled and stop after 1 failure.",
             "expect_tool": "run_pytest",
-            "check_args": lambda a: a.get("target_path") == "tests/test_parser.py" and int(a.get("maxfail", 0)) == 1,
+            "check_args": lambda a: (
+                a.get("target_path") == "tests/test_parser.py"
+                and _is_strict_int(a.get("maxfail")) and a.get("maxfail") == 1
+                and a.get("verbose") is True
+            ),
         },
         {
-            "id": "telemetry_lookup",
-            "prompt": "Check how much free VRAM in MB is currently available on the 'sheldon' node.",
+            "id": "02_telemetry_enum_exact",
+            "prompt": "Check how much free VRAM in MB is currently available on the 'edge-gpu' node.",
             "expect_tool": "query_device_telemetry",
-            "check_args": lambda a: str(a.get("node_name", "")).lower() == "sheldon" and a.get("metric") == "vram_free_mb",
+            "check_args": lambda a: (
+                a.get("node_name") == "edge-gpu" and a.get("metric") == "vram_free_mb"
+            ),
         },
         {
-            "id": "abstention_check",
+            "id": "03_crm_prose_extraction",
+            "prompt": (
+                "Log that I had a 20-minute phone call with Sarah Chen about the Q4 board budget, "
+                "and remind me to follow up in 7 days."
+            ),
+            "expect_tool": "log_crm_interaction",
+            "check_args": lambda a: (
+                "sarah chen" in str(a.get("contact_name", "")).lower()
+                and a.get("channel") == "phone"
+                and len(str(a.get("summary", "")).strip()) >= 8
+                and _is_strict_int(a.get("follow_up_days")) and a.get("follow_up_days") == 7
+            ),
+        },
+        {
+            "id": "04_alert_array_and_bool",
+            "prompt": (
+                "Send a critical alert titled 'Driveway motion after midnight' tagged with both "
+                "'camera' and 'perimeter', and make sure it is NOT suppressed during quiet hours."
+            ),
+            "expect_tool": "dispatch_alert",
+            "check_args": lambda a: (
+                a.get("severity") == "critical"
+                and "driveway" in str(a.get("title", "")).lower()
+                and isinstance(a.get("tags"), list)
+                and {"camera", "perimeter"}.issubset({str(x).lower() for x in a.get("tags", [])})
+                and a.get("suppress_if_quiet_hours") is False
+            ),
+        },
+        {
+            "id": "05_disambiguate_power_tool",
+            "prompt": "Put the edge-gpu node to sleep in 30 seconds because the nightly backup finished.",
+            "expect_tool": "schedule_power_action",
+            "check_args": lambda a: (
+                a.get("node_name") == "edge-gpu"
+                and a.get("action") == "sleep"
+                and _is_strict_int(a.get("delay_seconds")) and a.get("delay_seconds") == 30
+                and len(str(a.get("reason", "")).strip()) >= 4
+            ),
+        },
+        {
+            "id": "06_abstain_general_qa",
             "prompt": "Do NOT call any tools. In one short sentence, what does HTTP status code 429 mean?",
+            "expect_tool": None,
+            "check_args": lambda a: True,
+        },
+        {
+            "id": "07_abstain_advisory_no_action",
+            "prompt": (
+                "The workstation feels slow. Should I reboot it or check its GPU temperature first? "
+                "Do not run any tools or take any action yet — just advise me in two short sentences."
+            ),
+            "expect_tool": None,
+            "check_args": lambda a: True,
+        },
+        {
+            "id": "08_abstain_missing_required_fields",
+            "prompt": (
+                "I want to log a CRM note that I spoke with Alex Rivera about the partnership, "
+                "but I haven't told you the channel or follow-up days yet. "
+                "Ask me for those missing fields instead of guessing or calling any tool."
+            ),
             "expect_tool": None,
             "check_args": lambda a: True,
         },
@@ -186,39 +345,36 @@ def eval_tool_calling(
     passed = 0
     details = []
     total_tps = []
+    starved_any = False
 
-    for c in cases:
+    def _record_tps(res: dict):
+        nonlocal starved_any
+        if res["tps"] > 0:
+            total_tps.append(res["tps"])
+        if res.get("starved"):
+            starved_any = True
+
+    for c in single_turn_cases:
         res = ollama_chat(
             model,
             messages=[{"role": "user", "content": c["prompt"]}],
             tools=AGENT_TOOLS,
-            options={"temperature": 0.0, "num_predict": 512, "num_ctx": 4096},
+            options=opts,
             think=think,
             base_url=base_url,
         )
-        if res["tps"] > 0:
-            total_tps.append(res["tps"])
-
+        _record_tps(res)
         tcalls = res.get("tool_calls") or []
         success = False
         if c["expect_tool"] is None:
-            # Should abstain from calling tools and answer in text
-            success = (len(tcalls) == 0 and len(res["content"].strip()) > 5)
+            success = len(tcalls) == 0 and len(res["content"].strip()) > 5
         else:
-            if len(tcalls) >= 1:
-                fn = tcalls[0].get("function", {})
-                fname = fn.get("name")
-                fargs = fn.get("arguments", {})
-                if isinstance(fargs, str):
-                    try:
-                        fargs = json.loads(fargs)
-                    except Exception:
-                        fargs = {}
-                try:
-                    if isinstance(fargs, dict) and fname == c["expect_tool"] and c["check_args"](fargs):
-                        success = True
-                except (TypeError, ValueError):
-                    success = False
+            fname, fargs = _extract_first_tool_call(tcalls)
+            try:
+                if fargs is not None and fname == c["expect_tool"] and c["check_args"](fargs):
+                    success = True
+            except (TypeError, ValueError):
+                success = False
 
         if success:
             passed += 1
@@ -227,15 +383,113 @@ def eval_tool_calling(
             "passed": success,
             "tool_calls": tcalls,
             "elapsed_sec": res["elapsed_sec"],
+            "starved": res.get("starved", False),
             "error": res.get("error"),
         })
 
+    # Case 09: 2-Step Autonomous Tool Chain (zero frontier steering)
+    chain_msgs = [{
+        "role": "user",
+        "content": (
+            "First check the gpu_temp on 'workstation'. "
+            "After you receive the temperature, if it is above 85C, immediately dispatch a "
+            "critical alert with tag 'thermal' and suppress_if_quiet_hours set to false."
+        ),
+    }]
+    r_step1 = ollama_chat(model, chain_msgs, tools=AGENT_TOOLS, options=opts, think=think, base_url=base_url)
+    _record_tps(r_step1)
+    fn1, args1 = _extract_first_tool_call(r_step1.get("tool_calls") or [])
+    step1_ok = fn1 == "query_device_telemetry" and args1 is not None and (
+        args1.get("node_name") == "workstation" and args1.get("metric") == "gpu_temp"
+    )
+    step2_ok = False
+    r_step2 = {"tool_calls": [], "elapsed_sec": 0.0, "starved": False, "error": None}
+    if step1_ok:
+        chain_msgs.append({"role": "assistant", "content": r_step1["content"], "tool_calls": r_step1["tool_calls"]})
+        chain_msgs.append({
+            "role": "tool",
+            "content": json.dumps({"node_name": "workstation", "metric": "gpu_temp", "value": 92, "unit": "C"}),
+        })
+        r_step2 = ollama_chat(model, chain_msgs, tools=AGENT_TOOLS, options=opts, think=think, base_url=base_url)
+        _record_tps(r_step2)
+        fn2, args2 = _extract_first_tool_call(r_step2.get("tool_calls") or [])
+        step2_ok = fn2 == "dispatch_alert" and args2 is not None and (
+            args2.get("severity") == "critical"
+            and isinstance(args2.get("tags"), list)
+            and "thermal" in {str(x).lower() for x in args2.get("tags", [])}
+            and args2.get("suppress_if_quiet_hours") is False
+        )
+    chain_ok = step1_ok and step2_ok
+    if chain_ok:
+        passed += 1
+    details.append({
+        "case": "09_two_step_autonomous_chain",
+        "passed": chain_ok,
+        "step1_ok": step1_ok,
+        "step2_ok": step2_ok,
+        "tool_calls": (r_step1.get("tool_calls") or []) + (r_step2.get("tool_calls") or []),
+        "elapsed_sec": round(r_step1["elapsed_sec"] + r_step2["elapsed_sec"], 2),
+        "starved": r_step1.get("starved", False) or r_step2.get("starved", False),
+        "error": r_step1.get("error") or r_step2.get("error"),
+    })
+
+    # Case 10: Mechanical Validator-Error Self-Correction (no frontier babysitter)
+    repair_msgs = [
+        {
+            "role": "user",
+            "content": "Log my LinkedIn DM with Marcus Vance about the keynote invite, follow up in 5 days.",
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "function": {
+                    "name": "log_crm_interaction",
+                    "arguments": {
+                        "contact_name": "Marcus Vance",
+                        "channel": "dm",
+                        "summary": "Keynote invite",
+                        "follow_up_days": "5",
+                    },
+                }
+            }],
+        },
+        {
+            "role": "tool",
+            "content": (
+                "ValidationError: 'channel' must be one of ['email', 'linkedin', 'phone', 'in_person'] "
+                "(got 'dm'); 'follow_up_days' must be an integer (got string '5'). Retry with valid arguments."
+            ),
+        },
+    ]
+    r_fix = ollama_chat(model, repair_msgs, tools=AGENT_TOOLS, options=opts, think=think, base_url=base_url)
+    _record_tps(r_fix)
+    fn_fix, args_fix = _extract_first_tool_call(r_fix.get("tool_calls") or [])
+    fix_ok = fn_fix == "log_crm_interaction" and args_fix is not None and (
+        "marcus vance" in str(args_fix.get("contact_name", "")).lower()
+        and args_fix.get("channel") == "linkedin"
+        and len(str(args_fix.get("summary", "")).strip()) >= 4
+        and _is_strict_int(args_fix.get("follow_up_days")) and args_fix.get("follow_up_days") == 5
+    )
+    if fix_ok:
+        passed += 1
+    details.append({
+        "case": "10_validator_error_self_repair",
+        "passed": fix_ok,
+        "tool_calls": r_fix.get("tool_calls") or [],
+        "elapsed_sec": r_fix["elapsed_sec"],
+        "starved": r_fix.get("starved", False),
+        "error": r_fix.get("error"),
+    })
+
+    total_cases = len(single_turn_cases) + 2
     return {
-        "supported": any(len(d["tool_calls"]) > 0 for d in details[:2]),
+        "supported": any(len(d["tool_calls"]) > 0 for d in details),
         "passed": passed,
-        "total": len(cases),
-        "score_pct": round((passed / len(cases)) * 100, 1),
+        "total": total_cases,
+        "score_pct": round((passed / total_cases) * 100, 1),
         "avg_tps": round(sum(total_tps) / len(total_tps), 2) if total_tps else 0.0,
+        "starved": starved_any,
         "details": details,
     }
 
@@ -358,13 +612,14 @@ def eval_self_healing_code(
     model: str,
     think: Optional[bool] = None,
     base_url: Optional[str] = None,
+    num_ctx: int = 4096,
 ) -> dict:
     safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", model)
     messages = [{"role": "user", "content": PARSER_PROMPT}]
     t1 = ollama_chat(
         model,
         messages,
-        options={"temperature": 0.2, "num_predict": 2048, "num_ctx": 8192},
+        options={"temperature": 0.2, "num_predict": 2048, "num_ctx": num_ctx},
         think=think,
         base_url=base_url,
     )
@@ -383,7 +638,7 @@ def eval_self_healing_code(
         t2 = ollama_chat(
             model,
             messages,
-            options={"temperature": 0.2, "num_predict": 2048, "num_ctx": 8192},
+            options={"temperature": 0.2, "num_predict": 2048, "num_ctx": num_ctx},
             think=think,
             base_url=base_url,
         )
@@ -483,13 +738,14 @@ def eval_math_verification(
     model: str,
     think: Optional[bool] = None,
     base_url: Optional[str] = None,
+    num_ctx: int = 4096,
 ) -> dict:
     safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", model)
     messages = [{"role": "user", "content": MATH_PROMPT}]
     t1 = ollama_chat(
         model,
         messages,
-        options={"temperature": 0.1, "num_predict": 2048, "num_ctx": 8192},
+        options={"temperature": 0.1, "num_predict": 2048, "num_ctx": num_ctx},
         think=think,
         base_url=base_url,
     )
@@ -504,6 +760,30 @@ def eval_math_verification(
         "tps": t1["tps"],
         "starved": t1["starved"],
     }
+
+
+def classify_offload_readiness(tc: dict, sh: dict, mv: dict, composite: float) -> str:
+    """Classify whether a local model can run unattended without paying a frontier babysitter tax."""
+    starved = bool(tc.get("starved") or sh.get("turn1_starved") or sh.get("turn2_starved") or mv.get("starved"))
+    if tc["score_pct"] >= 90.0 and composite >= 85.0 and not starved:
+        return "Unattended Ready"
+    if tc["score_pct"] >= 70.0 and composite >= 60.0 and not starved:
+        return "Validator + Retry"
+    return "Net Frontier Tax"
+
+
+def _unload_model(model: str, base_url: str) -> None:
+    """Ask Ollama to evict weights before switching to the next model on constrained GPUs."""
+    try:
+        req = urllib.request.Request(
+            f"{normalize_ollama_url(base_url)}/api/chat",
+            data=json.dumps({"model": model, "messages": [], "keep_alive": 0}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=15):
+            pass
+    except Exception:
+        pass
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
@@ -529,6 +809,12 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Control Ollama's `think` parameter (default: auto = omit parameter).",
     )
     parser.add_argument(
+        "--num-ctx",
+        type=int,
+        default=4096,
+        help="Context window passed to Ollama (default: 4096 to stay 100%% GPU on 8GB cards).",
+    )
+    parser.add_argument(
         "--output",
         default=None,
         help="Path to write JSON results (default: results/run_<timestamp>.json).",
@@ -543,18 +829,19 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
 def format_markdown_table(summary: list[dict]) -> str:
     lines = [
-        "| Model | Track 1: Tool Calling | Track 2: Self-Healing (T1 -> T2) | Track 3: Bayesian Math | CoT Starved? | Composite |",
-        "| :--- | :---: | :---: | :---: | :---: | :---: |",
+        "| Model | Track 1: Tool Calling | Track 2: Self-Healing (T1 -> T2) | Track 3: Bayesian Math | CoT Starved? | Composite | Offload Verdict |",
+        "| :--- | :---: | :---: | :---: | :---: | :---: | :--- |",
     ]
     for row in summary:
         tc = row["tool_calling"]
         sh = row["self_healing"]
         mv = row["bayesian_math"]
-        starved = "Yes" if (sh["turn1_starved"] or sh["turn2_starved"] or mv["starved"]) else "No"
+        starved = "Yes" if (tc.get("starved") or sh["turn1_starved"] or sh["turn2_starved"] or mv["starved"]) else "No"
+        verdict = row.get("offload_verdict") or classify_offload_readiness(tc, sh, mv, row["composite_agent_score"])
         lines.append(
             f"| `{row['model']}` | {tc['passed']}/{tc['total']} ({tc['score_pct']}%) | "
             f"{sh['turn1_passed']}/10 -> {sh['turn2_passed']}/10 (+{sh['healed_delta']}) | "
-            f"{mv['passed']}/{mv['total']} ({mv['score_pct']}%) | {starved} | **{row['composite_agent_score']}%** |"
+            f"{mv['passed']}/{mv['total']} ({mv['score_pct']}%) | {starved} | **{row['composite_agent_score']}%** | {verdict} |"
         )
     return "\n".join(lines)
 
@@ -572,43 +859,51 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
 
     models = args.models
+    try:
+        installed = list_local_ollama_models(base_url)
+    except Exception as e:
+        print(f"[!] Could not reach Ollama at {base_url}: {e}", file=sys.stderr)
+        print("    Start Ollama or pass --base-url http://<host>:11434", file=sys.stderr)
+        return 1
+
     if not models:
-        try:
-            models = list_local_ollama_models(base_url)
-        except Exception as e:
-            print(f"[!] Could not reach Ollama at {base_url}: {e}", file=sys.stderr)
-            print("    Start Ollama or pass --base-url http://<host>:11434 --models <tag>", file=sys.stderr)
-            return 1
+        models = installed
         if not models:
             print(f"[!] No models found at {base_url}. Pull one first (e.g. `ollama pull gemma4:e2b`).", file=sys.stderr)
             return 1
 
     print("=" * 72)
-    print(f"LOCAL AGENTIC BENCHMARK SUITE | endpoint={base_url} | think={args.think}")
+    print(f"LOCAL AGENTIC BENCHMARK SUITE | endpoint={base_url} | think={args.think} | ctx={args.num_ctx}")
     print("=" * 72)
 
     summary = []
-    for m in models:
+    for idx, m in enumerate(models):
         print(f"\n>>> Benchmarking Model: {m}")
-        tc = eval_tool_calling(m, think=think_flag, base_url=base_url)
-        print(f"  [Track 1 - Tool Calling]  Score: {tc['passed']}/{tc['total']} ({tc['score_pct']}%) | Supported: {tc['supported']}")
+        tc = eval_tool_calling(m, think=think_flag, base_url=base_url, num_ctx=args.num_ctx)
+        print(f"  [Track 1 - Tool Calling]  Score: {tc['passed']}/{tc['total']} ({tc['score_pct']}%) | TPS: {tc['avg_tps']} | Supported: {tc['supported']}")
 
-        sh = eval_self_healing_code(m, think=think_flag, base_url=base_url)
+        sh = eval_self_healing_code(m, think=think_flag, base_url=base_url, num_ctx=args.num_ctx)
         print(f"  [Track 2 - Self-Healing]  Turn 1: {sh['turn1_passed']}/10 -> Turn 2: {sh['turn2_passed']}/10 (Delta: +{sh['healed_delta']}) | TPS: {sh['turn1_tps']}")
 
-        mv = eval_math_verification(m, think=think_flag, base_url=base_url)
+        mv = eval_math_verification(m, think=think_flag, base_url=base_url, num_ctx=args.num_ctx)
         print(f"  [Track 3 - Bayesian Math] Score: {mv['passed']}/5 ({mv['score_pct']}%) | TPS: {mv['tps']}")
 
         composite = round((tc["score_pct"] + sh["turn2_score_pct"] + mv["score_pct"]) / 3.0, 1)
+        verdict = classify_offload_readiness(tc, sh, mv, composite)
+        print(f"  [Composite / Verdict]     {composite}% -> {verdict}")
         summary.append({
             "model": m,
             "endpoint": base_url,
             "think": args.think,
+            "num_ctx": args.num_ctx,
             "tool_calling": tc,
             "self_healing": sh,
             "bayesian_math": mv,
             "composite_agent_score": composite,
+            "offload_verdict": verdict,
         })
+        if idx < len(models) - 1:
+            _unload_model(m, base_url)
 
     out_path = Path(args.output) if args.output else (RESULTS_DIR / f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
     out_path.parent.mkdir(parents=True, exist_ok=True)

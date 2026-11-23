@@ -1,0 +1,235 @@
+[
+  {
+    "model": "qwen3.5:9b",
+    "endpoint": "http://127.0.0.1:11434",
+    "think": "true",
+    "num_ctx": 4096,
+    "tool_calling": {
+      "supported": true,
+      "passed": 10,
+      "total": 10,
+      "score_pct": 100.0,
+      "avg_tps": 21.8,
+      "starved": false,
+      "details": [
+        {
+          "case": "01_pytest_strict_types",
+          "passed": true,
+          "tool_calls": [
+            {
+              "id": "call_rxoc91gm",
+              "function": {
+                "index": 0,
+                "name": "run_pytest",
+                "arguments": {
+                  "target_path": "tests/test_parser.py",
+                  "verbose": true,
+                  "maxfail": 1
+                }
+              }
+            }
+          ],
+          "elapsed_sec": 14.12,
+          "starved": false,
+          "error": null
+        },
+        {
+          "case": "02_telemetry_enum_exact",
+          "passed": true,
+          "tool_calls": [
+            {
+              "id": "call_vlko0sbm",
+              "function": {
+                "index": 0,
+                "name": "query_device_telemetry",
+                "arguments": {
+                  "node_name": "edge-gpu",
+                  "metric": "vram_free_mb"
+                }
+              }
+            }
+          ],
+          "elapsed_sec": 5.89,
+          "starved": false,
+          "error": null
+        },
+        {
+          "case": "03_crm_prose_extraction",
+          "passed": true,
+          "tool_calls": [
+            {
+              "id": "call_709shx4o",
+              "function": {
+                "index": 0,
+                "name": "log_crm_interaction",
+                "arguments": {
+                  "contact_name": "Sarah Chen",
+                  "channel": "phone",
+                  "summary": "20-minute phone call about Q4 board budget",
+                  "follow_up_days": 7
+                }
+              }
+            }
+          ],
+          "elapsed_sec": 10.0,
+          "starved": false,
+          "error": null
+        },
+        {
+          "case": "04_alert_array_and_bool",
+          "passed": true,
+          "tool_calls": [
+            {
+              "id": "call_klnirpz9",
+              "function": {
+                "index": 0,
+                "name": "dispatch_alert",
+                "arguments": {
+                  "severity": "critical",
+                  "title": "Driveway motion after midnight",
+                  "tags": [
+                    "camera",
+                    "perimeter"
+                  ],
+                  "suppress_if_quiet_hours": false
+                }
+              }
+            }
+          ],
+          "elapsed_sec": 8.04,
+          "starved": false,
+          "error": null
+        },
+        {
+          "case": "05_disambiguate_power_tool",
+          "passed": true,
+          "tool_calls": [
+            {
+              "id": "call_5ecds55o",
+              "function": {
+                "index": 0,
+                "name": "schedule_power_action",
+                "arguments": {
+                  "node_name": "edge-gpu",
+                  "action": "sleep",
+                  "delay_seconds": 30,
+                  "reason": "nightly backup finished"
+                }
+              }
+            }
+          ],
+          "elapsed_sec": 10.76,
+          "starved": false,
+          "error": null
+        },
+        {
+          "case": "06_abstain_general_qa",
+          "passed": true,
+          "tool_calls": [],
+          "elapsed_sec": 7.96,
+          "starved": false,
+          "error": null
+        },
+        {
+          "case": "07_abstain_advisory_no_action",
+          "passed": true,
+          "tool_calls": [],
+          "elapsed_sec": 7.78,
+          "starved": false,
+          "error": null
+        },
+        {
+          "case": "08_abstain_missing_required_fields",
+          "passed": true,
+          "tool_calls": [],
+          "elapsed_sec": 13.53,
+          "starved": false,
+          "error": null
+        },
+        {
+          "case": "09_two_step_autonomous_chain",
+          "passed": true,
+          "step1_ok": true,
+          "step2_ok": true,
+          "tool_calls": [
+            {
+              "id": "call_hxg31pso",
+              "function": {
+                "index": 0,
+                "name": "query_device_telemetry",
+                "arguments": {
+                  "node_name": "workstation",
+                  "metric": "gpu_temp"
+                }
+              }
+            },
+            {
+              "id": "call_7jo7u420",
+              "function": {
+                "index": 0,
+                "name": "dispatch_alert",
+                "arguments": {
+                  "severity": "critical",
+                  "title": "GPU Temperature Critical on Workstation",
+                  "tags": [
+                    "thermal"
+                  ],
+                  "suppress_if_quiet_hours": false
+                }
+              }
+            }
+          ],
+          "elapsed_sec": 11.66,
+          "starved": false,
+          "error": null
+        },
+        {
+          "case": "10_validator_error_self_repair",
+          "passed": true,
+          "tool_calls": [
+            {
+              "id": "call_kdjipoq8",
+              "function": {
+                "index": 0,
+                "name": "log_crm_interaction",
+                "arguments": {
+                  "contact_name": "Marcus Vance",
+                  "channel": "linkedin",
+                  "summary": "Keynote invite",
+                  "follow_up_days": 5
+                }
+              }
+            }
+          ],
+          "elapsed_sec": 6.52,
+          "starved": false,
+          "error": null
+        }
+      ]
+    },
+    "self_healing": {
+      "turn1_passed": 0,
+      "turn1_score_pct": 0.0,
+      "turn1_compiled": true,
+      "turn1_elapsed_sec": 95.75,
+      "turn1_tps": 21.7,
+      "turn1_starved": true,
+      "turn2_passed": 8,
+      "turn2_score_pct": 80.0,
+      "turn2_elapsed_sec": 51.23,
+      "turn2_starved": false,
+      "healed_delta": 8
+    },
+    "bayesian_math": {
+      "passed": 0,
+      "total": 5,
+      "score_pct": 0.0,
+      "compiled": true,
+      "elapsed_sec": 96.38,
+      "tps": 21.56,
+      "starved": true
+    },
+    "composite_agent_score": 60.0,
+    "offload_verdict": "Net Frontier Tax"
+  }
+]

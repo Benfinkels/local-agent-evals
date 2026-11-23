@@ -31,7 +31,31 @@ PYTHONPATH=. pytest tests/ -v
 
 ---
 
-## Empirical Scorecard (8GB vs. 24GB Local GPUs)
+## New: 8GB Autonomous Offload Showdown (10-Case Tool Suite, Zero Frontier Babysitter)
+
+In response to community feedback (*"Gemma is bad at real tool calls"*, *"how does Mistral hold up?"*, and *"what can you actually offload without paying a frontier babysitter tax?"*), Track 1 was expanded from 3 to **10 strict tool-calling tests** across 5 tools — strict int/bool/array schemas, prose-to-CRM extraction, 3 abstention traps (including missing required fields), a **2-step autonomous tool chain**, and **mechanical validator-error self-repair**.
+
+All models tested on a single **8GB RTX 2080** at `num_ctx=4096` ([`results/showdown_8gb_v2.json`](results/showdown_8gb_v2.json) & [`results/showdown_qwen35_think_on.json`](results/showdown_qwen35_think_on.json)):
+
+| Model | Size | Speed (tok/s) | Track 1: 10 Hard Tool Tests | Track 2: Self-Healing (`T1` $\rightarrow$ `T2`) | Track 3: Bayesian Math | CoT Starved? | **Composite** | **Offload Verdict** |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
+| **`gemma4:e2b-it-q4_K_M`** (`think=False`) | 7.2 GB | 66 | **10/10 (100%)** | `0/10` $\rightarrow$ **`8/10`** *(+8)* | **5/5 (100%)** | No | **93.3%** | **Unattended Ready** |
+| **`ministral-3:8b`** | 6.0 GB | 69 | **10/10 (100%)** | `7/10` $\rightarrow$ `7/10` *(+0)* | **5/5 (100%)** | No | **90.0%** | **Unattended Ready** |
+| **`ministral-3:3b`** | **3.0 GB** | **135** | **10/10 (100%)** | `6/10` $\rightarrow$ `6/10` *(+0)* | **5/5 (100%)** | No | **86.7%** | **Unattended Ready** |
+| **`qwen3.5:9b`** (`think=False`) | 6.6 GB | 23 | **10/10 (100%)** | `6/10` $\rightarrow$ `6/10` *(+0)* | **5/5 (100%)** | No | **86.7%** | **Unattended Ready** |
+| **`granite4:micro`** | **2.1 GB** | 121 | 8/10 (80%) | `7/10` $\rightarrow$ `7/10` *(+0)* | **5/5 (100%)** | No | **83.3%** | **Validator + Retry** |
+| **`qwen3.5:9b`** (`think=True`) | 6.6 GB | 22 | **10/10 (100%)** | `0/10` $\rightarrow$ **`8/10`** *(+8)* | 0/5 (0%) | **Yes** | **60.0%** | **Net Frontier Tax** |
+| **`phi4-mini:latest`** | 2.5 GB | 127 | 3/10 (30%) | `8/10` $\rightarrow$ `8/10` *(+0)* | 1/5 (20%) | No | **43.3%** | **Net Frontier Tax** |
+
+### Zero-Frontier Offload Takeaways
+- **Sleeper winner for fast $0 routing (`ministral-3:3b`):** At **3.0 GB** and **135 tok/s** (2x faster than Gemma 4, 6x faster than Qwen 3.5 9B), it hit **10/10** on every strict tool call, abstention trap, 2-step chain, and validator self-repair — obliterating `phi4-mini` (3/10, 0/7 actual tool calls) at nearly the same speed.
+- **Gemma 4 E2B held up on hard tools — and self-healed:** Scored **10/10** on the expanded tool suite and was the only non-thinking model to autonomously recover from a failing Python traceback (`0/10 -> 8/10`).
+- **One flag flipped Qwen 3.5 9B from Net Frontier Tax to Unattended Ready:** Turning `think=False` jumped `qwen3.5:9b` by **+26.7 points** (`60.0% -> 86.7%`) by eliminating Track 3 token starvation, though it stays 3x–6x slower than `ministral-3`.
+- **Where the "Frontier Babysitter Tax" still bites:** Even the best 8GB models topped out at `7–8/10` on tricky multi-constraint Python regex coding without healing to `10/10` — so **unattended offloading works great for structured routing, extraction, alerts, and tool chains (`<1,500` tokens)**, while complex multi-file code still belongs on a frontier model (or behind a deterministic unit-test gate).
+
+---
+
+## Earlier Empirical Scorecard (8GB vs. 24GB Local GPUs)
 
 Evaluated across two local hardware tiers:
 * **8GB GPU Tier:** NVIDIA RTX 2080 8GB / GTX 1080 8GB
@@ -69,7 +93,7 @@ Most LLM benchmarks measure single-turn chat fluency or static multiple-choice r
 
 | Track | Capability Tested | Verification Method |
 | :--- | :--- | :--- |
-| **Track 1: Native Tool Calling & Abstention** | Structured function dispatch (`run_pytest`, `query_device_telemetry`) + negative abstention control via Ollama `/api/chat` `tools` API | Strict JSON parameter type verification + false-positive tool call check (`3/3` cases) |
+| **Track 1: Autonomous Tool Calling & Self-Repair** | 10 strict cases across 5 tools (`run_pytest`, `query_device_telemetry`, `log_crm_interaction`, `dispatch_alert`, `schedule_power_action`): int/bool/array schemas, 3 abstention traps, a 2-step autonomous chain, and validator-error self-repair | Strict Python type/enum/list checks + zero-false-positive abstention (`10/10` cases) |
 | **Track 2: 2-Turn Self-Healing Code Loop** | Multi-constraint regex & boundary parser (`parse_hardware_identifiers`). If Turn 1 scores `<10/10`, the raw `unittest` traceback is fed back on Turn 2 | `py_compile` + 10-case `unittest` battery (`Turn 1` vs. `Turn 2` self-healing delta) |
 | **Track 3: Sequential Bayesian & Z-Score Math** | Population Z-score outlier filtering ($|x - \mu| > z\sigma$) coupled with $k$-step sequential Bayesian posterior fault updating | 5 exact floating-point `assertAlmostEqual` unit tests (`TestSensorBayes`) |
 
