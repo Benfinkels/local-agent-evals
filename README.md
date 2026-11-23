@@ -33,6 +33,10 @@ PYTHONPATH=. pytest tests/ -v
 
 ## New: 8GB Autonomous Offload Showdown (10-Case Tool Suite, Zero Frontier Babysitter)
 
+![8GB GPU Autonomous Agent Showdown](docs/charts/showdown_8gb_scorecard.png)
+
+![8GB GPU Speed vs. Reliability](docs/charts/showdown_8gb_speed_vs_score.png)
+
 In response to community feedback (*"Gemma is bad at real tool calls"*, *"how does Mistral hold up?"*, and *"what can you actually offload without paying a frontier babysitter tax?"*), Track 1 was expanded from 3 to **10 strict tool-calling tests** across 5 tools — strict int/bool/array schemas, prose-to-CRM extraction, 3 abstention traps (including missing required fields), a **2-step autonomous tool chain**, and **mechanical validator-error self-repair**.
 
 All models tested on a single **8GB RTX 2080** at `num_ctx=4096` ([`results/showdown_8gb_v2.json`](results/showdown_8gb_v2.json) & [`results/showdown_qwen35_think_on.json`](results/showdown_qwen35_think_on.json)):

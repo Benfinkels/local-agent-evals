@@ -230,8 +230,208 @@ def make_speculative_4090_chart() -> None:
     plt.close(fig)
 
 
+def make_showdown_8gb_charts() -> None:
+    """Plot the 8GB RTX 2080 10-case autonomous tool showdown & speed-vs-score chart."""
+    v2_path = RESULTS / "showdown_8gb_v2.json"
+    qwen_on_path = RESULTS / "showdown_qwen35_think_on.json"
+    if not (v2_path.exists() and qwen_on_path.exists()):
+        return
+
+    rows = json.loads(v2_path.read_text(encoding="utf-8"))
+    qwen_on = json.loads(qwen_on_path.read_text(encoding="utf-8"))
+    all_rows = rows + qwen_on
+
+    size_gb = {
+        "gemma4:e2b-it-q4_K_M": 7.2,
+        "ministral-3:8b": 6.0,
+        "ministral-3:3b": 3.0,
+        "granite4:micro": 2.1,
+        "qwen3.5:9b": 6.6,
+        "phi4-mini:latest": 2.5,
+    }
+    verdict_colors = {
+        "Unattended Ready": "#10b981",
+        "Validator + Retry": "#f59e0b",
+        "Net Frontier Tax": "#ef4444",
+    }
+
+    def fmt_label(r: dict) -> str:
+        m = r["model"]
+        gb = size_gb.get(m, 4.0)
+        short = m.replace("-it-q4_K_M", "").replace(":latest", "")
+        if m == "qwen3.5:9b":
+            tag = "think=on" if r.get("think") == "true" else "think=off"
+            return f"{short} ({tag}, {gb:.1f} GB)"
+        return f"{short} ({gb:.1f} GB)"
+
+    # Sort descending by composite score, then speed
+    all_rows.sort(
+        key=lambda r: (r["composite_agent_score"], r["tool_calling"]["avg_tps"]),
+        reverse=True,
+    )
+
+    # Chart 1: Horizontal 2-panel Scorecard (10 Hard Tool Tests + Composite Score)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5.2), sharey=True)
+    fig.suptitle(
+        "8GB GPU Autonomous Agent Showdown (RTX 2080, ctx=4096, Zero Frontier Help)",
+        fontsize=13,
+        fontweight="bold",
+        y=0.97,
+    )
+
+    labels = [fmt_label(r) for r in all_rows][::-1]
+    tool_pcts = [r["tool_calling"]["score_pct"] for r in all_rows][::-1]
+    tool_raw = [f"{r['tool_calling']['passed']}/{r['tool_calling']['total']}" for r in all_rows][::-1]
+    comp_pcts = [r["composite_agent_score"] for r in all_rows][::-1]
+    verdicts = [r["offload_verdict"] for r in all_rows][::-1]
+    cols = [verdict_colors.get(v, "#64748b") for v in verdicts]
+    y = np.arange(len(labels))
+
+    b1 = ax1.barh(y, tool_pcts, color=cols, height=0.6)
+    ax1.set_yticks(y)
+    ax1.set_yticklabels(labels, fontsize=9.5)
+    ax1.set_xlim(0, 122)
+    ax1.set_xlabel("Pass Rate (%)", fontsize=10, fontweight="bold")
+    ax1.set_title("Track 1: 10 Hard Tool-Calling Traps", fontsize=11, pad=8)
+    ax1.grid(axis="y", visible=False)
+    for bar, pct, raw in zip(b1, tool_pcts, tool_raw):
+        ax1.text(
+            pct + 2.0,
+            bar.get_y() + bar.get_height() / 2,
+            f"{raw} ({pct:.0f}%)",
+            va="center",
+            fontsize=9,
+            fontweight="bold",
+        )
+
+    b2 = ax2.barh(y, comp_pcts, color=cols, height=0.6)
+    ax2.set_xlim(0, 125)
+    ax2.set_xlabel("Composite Score (%)", fontsize=10, fontweight="bold")
+    ax2.set_title("Overall Composite (Tools + Self-Heal + Math)", fontsize=11, pad=8)
+    ax2.grid(axis="y", visible=False)
+    for bar, pct, v in zip(b2, comp_pcts, verdicts):
+        ax2.text(
+            pct + 2.0,
+            bar.get_y() + bar.get_height() / 2,
+            f"{pct:.1f}%",
+            va="center",
+            fontsize=9,
+            fontweight="bold",
+        )
+
+    from matplotlib.patches import Patch
+
+    legend_handles = [
+        Patch(facecolor="#10b981", label="Unattended Ready"),
+        Patch(facecolor="#f59e0b", label="Validator + Retry"),
+        Patch(facecolor="#ef4444", label="Net Frontier Tax"),
+    ]
+    fig.legend(
+        handles=legend_handles,
+        loc="lower center",
+        ncol=3,
+        frameon=False,
+        fontsize=9.5,
+        bbox_to_anchor=(0.5, 0.01),
+    )
+    plt.tight_layout(rect=[0, 0.06, 1, 0.92])
+    fig.savefig(OUT_DIR / "showdown_8gb_scorecard.png", dpi=170)
+    plt.close(fig)
+
+    # Chart 2: Speed vs Composite Score (bubble size = model GB) + Qwen think arrow
+    fig, ax = plt.subplots(figsize=(9.8, 5.8))
+    ax.axhspan(85, 105, xmin=0.0, xmax=1.0, color="#10b981", alpha=0.07, zorder=0)
+    ax.axhline(85, color="#10b981", linestyle=":", linewidth=1.2, zorder=1)
+    ax.text(8, 102.2, "Unattended Ready Zone (85%+)", ha="left", fontsize=8.8, color="#047857", fontweight="bold")
+
+    offsets = {
+        ("gemma4:e2b-it-q4_K_M", "false"): (-14, 22, "right"),
+        ("ministral-3:8b", "false"): (16, -24, "left"),
+        ("ministral-3:3b", "false"): (0, 24, "center"),
+        ("granite4:micro", "false"): (-14, -24, "right"),
+        ("qwen3.5:9b", "false"): (16, 4, "left"),
+        ("qwen3.5:9b", "true"): (16, -4, "left"),
+        ("phi4-mini:latest", "false"): (-14, 14, "right"),
+    }
+
+    q_on_pt = None
+    q_off_pt = None
+    for r in all_rows:
+        m = r["model"]
+        th = r.get("think", "false")
+        tps = r["tool_calling"]["avg_tps"]
+        sc = r["composite_agent_score"]
+        gb = size_gb.get(m, 4.0)
+        col = verdict_colors.get(r["offload_verdict"], "#64748b")
+        ax.scatter(
+            tps,
+            sc,
+            s=gb * 75,
+            color=col,
+            alpha=0.88,
+            edgecolors="#111827",
+            linewidth=1.0,
+            zorder=4,
+        )
+        if m == "qwen3.5:9b" and th == "true":
+            q_on_pt = (tps, sc)
+        elif m == "qwen3.5:9b" and th == "false":
+            q_off_pt = (tps, sc)
+
+        dx, dy, ha = offsets.get((m, th), (8, 6, "left"))
+        short = m.replace("-it-q4_K_M", "").replace(":latest", "")
+        if m == "qwen3.5:9b":
+            short += " (think=on)" if th == "true" else " (think=off)"
+        ax.annotate(
+            f"{short}\n{sc:.1f}% | {tps:.0f} tok/s | {gb:.1f} GB",
+            (tps, sc),
+            xytext=(dx, dy),
+            textcoords="offset points",
+            ha=ha,
+            va="center",
+            fontsize=8.5,
+            fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="#e5e7eb", alpha=0.88),
+            zorder=5,
+        )
+
+    if q_on_pt and q_off_pt:
+        ax.annotate(
+            "",
+            xy=(q_off_pt[0], q_off_pt[1] - 2.2),
+            xytext=(q_on_pt[0], q_on_pt[1] + 2.2),
+            arrowprops=dict(arrowstyle="->", color="#2563eb", lw=2.0, ls="--"),
+            zorder=3,
+        )
+        ax.text(
+            q_on_pt[0] + 3.0,
+            (q_on_pt[1] + q_off_pt[1]) / 2,
+            "+26.7 pts\n(think=False)",
+            fontsize=8.5,
+            color="#1d4ed8",
+            fontweight="bold",
+            va="center",
+        )
+
+    ax.set_xlim(5, 155)
+    ax.set_ylim(32, 105)
+    ax.set_xlabel("Generation Speed on RTX 2080 8GB (tokens/sec)", fontsize=10.5, fontweight="bold")
+    ax.set_ylabel("Composite Agent Score (%)", fontsize=10.5, fontweight="bold")
+    ax.set_title(
+        "Speed vs. Reliability on an 8GB GPU (Bubble Size = Model Size in GB)",
+        fontsize=12.5,
+        fontweight="bold",
+        pad=12,
+    )
+    ax.legend(handles=legend_handles, loc="lower left", frameon=True, facecolor="white", edgecolor="#e5e7eb", fontsize=9)
+    plt.tight_layout()
+    fig.savefig(OUT_DIR / "showdown_8gb_speed_vs_score.png", dpi=170)
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     make_model_scorecard_chart()
     make_thinking_starvation_chart()
     make_speculative_4090_chart()
+    make_showdown_8gb_charts()
     print("Generated charts in", OUT_DIR)
