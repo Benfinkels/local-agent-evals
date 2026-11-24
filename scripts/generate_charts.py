@@ -603,10 +603,127 @@ def make_ep1_9model_charts() -> None:
     plt.close(fig)
 
 
+def make_ep2_briefing_charts() -> None:
+    """Plot Episode 2 (MiniMax Cloud vs 5 Local 8GB Models on Private Morning-Briefing Agent Eval)."""
+    ep2_path = RESULTS / "ep2_briefing_results.json"
+    if not ep2_path.exists():
+        return
+
+    rows = json.loads(ep2_path.read_text(encoding="utf-8"))
+    rows.sort(key=lambda r: (r["pass_k_pct"], -r["injection_hijacks"], -r["false_positives"]), reverse=True)
+
+    def short_name(m: str) -> str:
+        return m.replace("-it-q4_K_M", "").replace(":latest", "")
+
+    from matplotlib.patches import Patch
+
+    # Chart 1: Overall pass^3 + per-task pass^3 heatmap/grouped bars
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13.4, 5.2), gridspec_kw={"width_ratios": [1.15, 1.15]})
+    fig.suptitle(
+        "Private Morning-Briefing Agent Eval: Cloud Baseline vs. 8GB Local Models (pass^3 @ temp=0.2)",
+        fontsize=12.3,
+        fontweight="bold",
+        y=0.97,
+    )
+
+    labels = [short_name(r["model"]) for r in rows][::-1]
+    pass3 = [r["pass_k_pct"] for r in rows][::-1]
+    raw_lbl = [f"{r['pass_k_count']}/12 ({r['pass_k_pct']:.1f}%)" for r in rows][::-1]
+    cols = []
+    for r in rows[::-1]:
+        if "Cloud" in r["model"]:
+            cols.append("#6366f1")
+        elif r["pass_k_pct"] >= 80 and r["injection_hijacks"] == 0:
+            cols.append("#10b981")
+        elif r["injection_hijacks"] > 0:
+            cols.append("#ef4444")
+        else:
+            cols.append("#f59e0b")
+
+    y = np.arange(len(labels))
+    bars = ax1.barh(y, pass3, color=cols, height=0.58)
+    ax1.set_yticks(y)
+    ax1.set_yticklabels(labels, fontsize=9.5, fontweight="bold")
+    ax1.set_xlim(0, 118)
+    ax1.set_xlabel("Strict pass^3 Rate (Passed All 3 Runs, %)", fontsize=9.8, fontweight="bold")
+    ax1.set_title("Overall Unattended Reliability (12 Cases)", fontsize=10.8, pad=8)
+    ax1.grid(axis="y", visible=False)
+    for bar, pct, txt in zip(bars, pass3, raw_lbl):
+        ax1.text(pct + 1.8, bar.get_y() + bar.get_height() / 2, txt, va="center", fontsize=9, fontweight="bold")
+
+    # Right panel: 3-task pass^3 matrix (heatmap)
+    tasks = ["Inbox Triage\n(4 cases)", "Dropped Ball\n(4 cases)", "CRM News\n(4 cases)"]
+    task_keys = ["inbox_triage", "dropped_ball", "crm_news"]
+    mat = np.array([[r["by_task"][k]["pass_k_pct"] for k in task_keys] for r in rows])
+    im = ax2.imshow(mat, cmap="RdYlGn", vmin=0, vmax=100, aspect="auto")
+    ax2.set_xticks(np.arange(len(tasks)))
+    ax2.set_xticklabels(tasks, fontsize=9.5, fontweight="bold")
+    ax2.set_yticks(np.arange(len(rows)))
+    ax2.set_yticklabels([short_name(r["model"]) for r in rows], fontsize=9.2)
+    ax2.set_title("Per-Task pass^3 Breakdown (All 3 Runs)", fontsize=10.8, pad=8)
+    ax2.grid(False)
+    for i, r in enumerate(rows):
+        for j, k in enumerate(task_keys):
+            pk = r["by_task"][k]["pass_k"]
+            pct = r["by_task"][k]["pass_k_pct"]
+            txt_col = "white" if (pct <= 30 or pct >= 95) else "#111827"
+            ax2.text(j, i, f"{pk}/4\n({pct:.0f}%)", ha="center", va="center", fontsize=9, fontweight="bold", color=txt_col)
+
+    legend_handles = [
+        Patch(facecolor="#6366f1", label="Cloud Reference (MiniMax-M2.7)"),
+        Patch(facecolor="#10b981", label="Local Safe (0 Hijacks, >=80% pass^3)"),
+        Patch(facecolor="#f59e0b", label="Local Safe but Lower Recall (0 Hijacks)"),
+        Patch(facecolor="#ef4444", label="Prompt-Injection Hijacked (3/3)"),
+    ]
+    fig.legend(handles=legend_handles, loc="lower center", ncol=2, frameon=False, fontsize=8.8, bbox_to_anchor=(0.5, 0.005))
+    plt.tight_layout(rect=[0, 0.09, 1, 0.92])
+    fig.savefig(OUT_DIR / "ep2_briefing_pass3_matrix.png", dpi=170)
+    plt.close(fig)
+
+    # Chart 2: Safety Failures — Email Prompt-Injection Hijacks & False Positives
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12.8, 4.8), sharey=True)
+    fig.suptitle(
+        "Silent Failure & Security Audit: Prompt-Injection Hijacks vs. False Positives (36 Runs / Model)",
+        fontsize=12.0,
+        fontweight="bold",
+        y=0.97,
+    )
+
+    hijacks = [r["injection_hijacks"] for r in rows][::-1]
+    fps = [r["false_positives"] for r in rows][::-1]
+    h_cols = ["#10b981" if h == 0 else "#ef4444" for h in hijacks]
+    f_cols = ["#10b981" if f <= 1 else ("#f59e0b" if f <= 6 else "#ef4444") for f in fps]
+
+    b1 = ax1.barh(y, hijacks, color=h_cols, height=0.58)
+    ax1.set_yticks(y)
+    ax1.set_yticklabels(labels, fontsize=9.5, fontweight="bold")
+    ax1.set_xlim(0, 3.85)
+    ax1.set_xticks([0, 1, 2, 3])
+    ax1.set_xlabel("Hijacked Runs (out of 3 on 25-Email Batch)", fontsize=9.8, fontweight="bold")
+    ax1.set_title("Indirect Email Prompt-Injection Hijacks (Lower = Safer)", fontsize=10.5, pad=8)
+    ax1.grid(axis="y", visible=False)
+    for bar, h in zip(b1, hijacks):
+        tag = "0/3 (IMMUNE)" if h == 0 else f"{h}/3 HIJACKED!"
+        ax1.text(h + 0.08, bar.get_y() + bar.get_height() / 2, tag, va="center", fontsize=9, fontweight="bold", color="#047857" if h == 0 else "#b91c1c")
+
+    b2 = ax2.barh(y, fps, color=f_cols, height=0.58)
+    ax2.set_xlim(0, 11.5)
+    ax2.set_xlabel("False Positives / Bad Picks (out of 36 checks)", fontsize=9.8, fontweight="bold")
+    ax2.set_title("Silent False Positives on Decoys & All-Noise Controls", fontsize=10.5, pad=8)
+    ax2.grid(axis="y", visible=False)
+    for bar, f in zip(b2, fps):
+        ax2.text(f + 0.18, bar.get_y() + bar.get_height() / 2, f"{f}/36", va="center", fontsize=9, fontweight="bold", color="#047857" if f <= 1 else "#111827")
+
+    plt.tight_layout(rect=[0, 0.02, 1, 0.91])
+    fig.savefig(OUT_DIR / "ep2_injection_and_fp.png", dpi=170)
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     make_model_scorecard_chart()
     make_thinking_starvation_chart()
     make_speculative_4090_chart()
     make_showdown_8gb_charts()
     make_ep1_9model_charts()
+    make_ep2_briefing_charts()
     print("Generated charts in", OUT_DIR)
