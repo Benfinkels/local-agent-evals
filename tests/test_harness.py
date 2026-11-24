@@ -255,34 +255,87 @@ def test_ollama_chat_passes_think_flag_when_set():
     assert captured["payload"]["think"] is False
 
 
-def test_eval_tool_calling_10_cases_and_offload_verdict():
+def test_eval_tool_calling_12_cases_split_and_offload_verdict():
     from unittest.mock import patch
     from evals.runner import classify_offload_readiness, eval_tool_calling
 
-    responses = iter([
-        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "run_pytest", "arguments": {"target_path": "tests/test_parser.py", "maxfail": 1, "verbose": True}}}]},
-        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "query_device_telemetry", "arguments": {"node_name": "edge-gpu", "metric": "vram_free_mb"}}}]},
-        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "log_crm_interaction", "arguments": {"contact_name": "Sarah Chen", "channel": "phone", "summary": "Discussed Q4 board budget", "follow_up_days": 7}}}]},
-        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "dispatch_alert", "arguments": {"severity": "critical", "title": "Driveway motion after midnight", "tags": ["camera", "perimeter"], "suppress_if_quiet_hours": False}}}]},
-        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "schedule_power_action", "arguments": {"node_name": "edge-gpu", "action": "sleep", "delay_seconds": 30, "reason": "Nightly backup finished"}}}]},
-        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "HTTP 429 means Too Many Requests (rate limit exceeded).", "tool_calls": []},
-        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "Check GPU temperature first before rebooting.", "tool_calls": []},
-        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "Which channel did you use and how many days until follow-up?", "tool_calls": []},
-        # Case 09 (2-step chain: step 1 telemetry -> step 2 alert)
-        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "query_device_telemetry", "arguments": {"node_name": "workstation", "metric": "gpu_temp"}}}]},
-        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "dispatch_alert", "arguments": {"severity": "critical", "title": "Workstation GPU overheating at 92C", "tags": ["thermal"], "suppress_if_quiet_hours": False}}}]},
-        # Case 10 (validator error self-repair)
-        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "log_crm_interaction", "arguments": {"contact_name": "Marcus Vance", "channel": "linkedin", "summary": "Keynote invite", "follow_up_days": 5}}}]},
-    ])
+    def perfect_responses():
+        return iter([
+            {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "run_pytest", "arguments": {"target_path": "tests/test_parser.py", "maxfail": 1, "verbose": True}}}]},
+            {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "query_device_telemetry", "arguments": {"node_name": "edge-gpu", "metric": "vram_free_mb"}}}]},
+            {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "log_crm_interaction", "arguments": {"contact_name": "Sarah Chen", "channel": "phone", "summary": "Discussed Q4 board budget", "follow_up_days": 7}}}]},
+            {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "dispatch_alert", "arguments": {"severity": "critical", "title": "Driveway motion after midnight", "tags": ["camera", "perimeter"], "suppress_if_quiet_hours": False}}}]},
+            {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "schedule_power_action", "arguments": {"node_name": "edge-gpu", "action": "sleep", "delay_seconds": 30, "reason": "Nightly backup finished"}}}]},
+            # 5 No-Call Restraint cases
+            {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "HTTP 429 means Too Many Requests.", "tool_calls": []},
+            {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "Check GPU temperature first before rebooting.", "tool_calls": []},
+            {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "Which channel did you use and how many days until follow-up?", "tool_calls": []},
+            {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "Example: Alerting team that GPU hit 95C and workloads are throttled.", "tool_calls": []},
+            {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "You ran parser tests and put edge-gpu to sleep after backup.", "tool_calls": []},
+            # Case 11 (2-step chain)
+            {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "query_device_telemetry", "arguments": {"node_name": "workstation", "metric": "gpu_temp"}}}]},
+            {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "dispatch_alert", "arguments": {"severity": "critical", "title": "Workstation GPU overheating at 92C", "tags": ["thermal"], "suppress_if_quiet_hours": False}}}]},
+            # Case 12 (validator error self-repair)
+            {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "log_crm_interaction", "arguments": {"contact_name": "Marcus Vance", "channel": "linkedin", "summary": "Keynote invite", "follow_up_days": 5}}}]},
+        ])
 
-    with patch("evals.runner.ollama_chat", side_effect=lambda *a, **kw: next(responses)):
-        tc = eval_tool_calling("mock-model")
+    res_stream = list(perfect_responses()) * 2
+    it = iter(res_stream)
+    with patch("evals.runner.ollama_chat", side_effect=lambda *a, **kw: next(it)):
+        tc = eval_tool_calling("mock-model", runs=2, temperature=0.2)
 
-    assert tc["total"] == 10
-    assert tc["passed"] == 10
+    assert tc["runs"] == 2
+    assert tc["action_passed"] == 14 and tc["action_total"] == 14
+    assert tc["abstention_passed"] == 10 and tc["abstention_total"] == 10
+    assert tc["extra_calls_rejected"] == 0
     assert tc["score_pct"] == 100.0
     assert classify_offload_readiness(tc, {"turn1_starved": False, "turn2_starved": False}, {"starved": False}, 96.7) == "Unattended Ready"
     assert classify_offload_readiness({"score_pct": 80.0, "starved": False}, {"turn1_starved": False, "turn2_starved": False}, {"starved": False}, 75.0) == "Validator + Retry"
     assert classify_offload_readiness({"score_pct": 60.0, "starved": False}, {"turn1_starved": False, "turn2_starved": False}, {"starved": False}, 70.0) == "Net Frontier Tax"
+
+
+def test_extra_unwanted_tool_call_is_rejected():
+    """Negative fixture (per u/MongooseWonderful198): valid run_pytest + unwanted schedule_power_action must FAIL."""
+    from unittest.mock import patch
+    from evals.runner import eval_tool_calling_once
+
+    bad_pair = [
+        {"function": {"name": "run_pytest", "arguments": {"target_path": "tests/test_parser.py", "maxfail": 1, "verbose": True}}},
+        {"function": {"name": "schedule_power_action", "arguments": {"node_name": "edge-gpu", "action": "poweroff", "delay_seconds": 0, "reason": "unwanted"}}},
+    ]
+    responses = iter([
+        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": bad_pair},
+        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "query_device_telemetry", "arguments": {"node_name": "edge-gpu", "metric": "vram_free_mb"}}}]},
+        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "log_crm_interaction", "arguments": {"contact_name": "Sarah Chen", "channel": "phone", "summary": "Discussed Q4 board budget", "follow_up_days": 7}}}]},
+        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "dispatch_alert", "arguments": {"severity": "critical", "title": "Driveway motion", "tags": ["camera", "perimeter"], "suppress_if_quiet_hours": False}}}]},
+        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [{"function": {"name": "schedule_power_action", "arguments": {"node_name": "edge-gpu", "action": "sleep", "delay_seconds": 30, "reason": "Backup done"}}}]},
+        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "HTTP 429 means rate limited.", "tool_calls": []},
+        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "Check GPU temp first.", "tool_calls": []},
+        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "Which channel and how many days?", "tool_calls": []},
+        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "Sample thermal alert documentation text.", "tool_calls": []},
+        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "You ran tests and slept edge-gpu.", "tool_calls": []},
+        # Chain step 1 with extra unwanted call -> must fail chain!
+        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [
+            {"function": {"name": "query_device_telemetry", "arguments": {"node_name": "workstation", "metric": "gpu_temp"}}},
+            {"function": {"name": "schedule_power_action", "arguments": {"node_name": "workstation", "action": "reboot", "delay_seconds": 0, "reason": "extra"}}},
+        ]},
+        # Repair step with extra unwanted call -> must fail repair!
+        {"tps": 60.0, "elapsed_sec": 0.5, "starved": False, "content": "", "tool_calls": [
+            {"function": {"name": "log_crm_interaction", "arguments": {"contact_name": "Marcus Vance", "channel": "linkedin", "summary": "Keynote invite", "follow_up_days": 5}}},
+            {"function": {"name": "dispatch_alert", "arguments": {"severity": "info", "title": "extra", "tags": ["spam"], "suppress_if_quiet_hours": True}}},
+        ]},
+    ])
+
+    with patch("evals.runner.ollama_chat", side_effect=lambda *a, **kw: next(responses)):
+        tc = eval_tool_calling_once("mock-model")
+
+    assert tc["extra_calls_rejected"] == 3
+    assert tc["action_passed"] == 4 and tc["action_total"] == 7
+    assert tc["abstention_passed"] == 5 and tc["abstention_total"] == 5
+    case_map = {d["case"]: d for d in tc["details"]}
+    assert case_map["01_pytest_strict_types"]["passed"] is False
+    assert case_map["01_pytest_strict_types"]["extra_calls_rejected"] is True
+    assert case_map["11_two_step_autonomous_chain"]["passed"] is False
+    assert case_map["12_validator_error_self_repair"]["passed"] is False
 
 

@@ -231,9 +231,16 @@ AGENT_TOOLS = [
 ]
 
 
-def _extract_first_tool_call(tcalls: list) -> tuple[Optional[str], Optional[dict]]:
+def _extract_exact_single_tool_call(tcalls: list) -> tuple[Optional[str], Optional[dict], bool]:
+    """
+    Validate that the model emitted EXACTLY one tool call.
+    Returns (function_name, arguments_dict, had_extra_calls).
+    Rejects responses that bundle an unwanted extra tool call alongside a valid one.
+    """
     if not tcalls:
-        return None, None
+        return None, None, False
+    if len(tcalls) != 1:
+        return None, None, True
     fn = tcalls[0].get("function", {})
     fname = fn.get("name")
     fargs = fn.get("arguments", {})
@@ -241,22 +248,30 @@ def _extract_first_tool_call(tcalls: list) -> tuple[Optional[str], Optional[dict
         try:
             fargs = json.loads(fargs)
         except Exception:
-            return fname, None
-    return fname, fargs if isinstance(fargs, dict) else None
+            return fname, None, False
+    return fname, (fargs if isinstance(fargs, dict) else None), False
 
 
 def _is_strict_int(v) -> bool:
     return isinstance(v, int) and not isinstance(v, bool)
 
 
-def eval_tool_calling(
+def eval_tool_calling_once(
     model: str,
     think: Optional[bool] = None,
     base_url: Optional[str] = None,
     num_ctx: int = 4096,
+    temperature: float = 0.0,
 ) -> dict:
-    opts = {"temperature": 0.0, "num_predict": 512, "num_ctx": num_ctx}
-    single_turn_cases = [
+    """
+    Run 12 deterministic Track 1 cases split cleanly into:
+      - Action Accuracy (7 cases): 5 single-turn tool calls, 1 two-step autonomous chain,
+        and 1 mechanical validator-error self-repair. Every positive step requires EXACTLY
+        one valid tool call (extra unwanted calls fail).
+      - No-Call Restraint / Abstention (5 cases): prompts where the model MUST emit 0 tool calls.
+    """
+    opts = {"temperature": temperature, "num_predict": 512, "num_ctx": num_ctx}
+    action_cases = [
         {
             "id": "01_pytest_strict_types",
             "prompt": "Run pytest on 'tests/test_parser.py' with verbose enabled and stop after 1 failure.",
@@ -315,11 +330,12 @@ def eval_tool_calling(
                 and len(str(a.get("reason", "")).strip()) >= 4
             ),
         },
+    ]
+
+    abstention_cases = [
         {
             "id": "06_abstain_general_qa",
             "prompt": "Do NOT call any tools. In one short sentence, what does HTTP status code 429 mean?",
-            "expect_tool": None,
-            "check_args": lambda a: True,
         },
         {
             "id": "07_abstain_advisory_no_action",
@@ -327,8 +343,6 @@ def eval_tool_calling(
                 "The workstation feels slow. Should I reboot it or check its GPU temperature first? "
                 "Do not run any tools or take any action yet — just advise me in two short sentences."
             ),
-            "expect_tool": None,
-            "check_args": lambda a: True,
         },
         {
             "id": "08_abstain_missing_required_fields",
@@ -337,12 +351,27 @@ def eval_tool_calling(
                 "but I haven't told you the channel or follow-up days yet. "
                 "Ask me for those missing fields instead of guessing or calling any tool."
             ),
-            "expect_tool": None,
-            "check_args": lambda a: True,
+        },
+        {
+            "id": "09_abstain_hypothetical_doc_example",
+            "prompt": (
+                "Write a two-sentence documentation example showing how an on-call engineer would "
+                "describe a critical thermal alert to a teammate. This is only sample doc text — "
+                "do NOT dispatch any real alert or call any tool."
+            ),
+        },
+        {
+            "id": "10_abstain_past_tense_summary",
+            "prompt": (
+                "Earlier today I already ran pytest on tests/test_parser.py and put edge-gpu to sleep "
+                "after the backup finished. Just summarize what I did in one sentence without calling any tools."
+            ),
         },
     ]
 
-    passed = 0
+    action_passed = 0
+    abstention_passed = 0
+    extra_calls_rejected = 0
     details = []
     total_tps = []
     starved_any = False
@@ -354,7 +383,7 @@ def eval_tool_calling(
         if res.get("starved"):
             starved_any = True
 
-    for c in single_turn_cases:
+    for c in action_cases:
         res = ollama_chat(
             model,
             messages=[{"role": "user", "content": c["prompt"]}],
@@ -365,29 +394,55 @@ def eval_tool_calling(
         )
         _record_tps(res)
         tcalls = res.get("tool_calls") or []
+        fname, fargs, extra = _extract_exact_single_tool_call(tcalls)
+        if extra:
+            extra_calls_rejected += 1
         success = False
-        if c["expect_tool"] is None:
-            success = len(tcalls) == 0 and len(res["content"].strip()) > 5
-        else:
-            fname, fargs = _extract_first_tool_call(tcalls)
-            try:
-                if fargs is not None and fname == c["expect_tool"] and c["check_args"](fargs):
-                    success = True
-            except (TypeError, ValueError):
-                success = False
+        try:
+            if not extra and fargs is not None and fname == c["expect_tool"] and c["check_args"](fargs):
+                success = True
+        except (TypeError, ValueError):
+            success = False
 
         if success:
-            passed += 1
+            action_passed += 1
         details.append({
             "case": c["id"],
+            "category": "action",
             "passed": success,
+            "extra_calls_rejected": extra,
             "tool_calls": tcalls,
             "elapsed_sec": res["elapsed_sec"],
             "starved": res.get("starved", False),
             "error": res.get("error"),
         })
 
-    # Case 09: 2-Step Autonomous Tool Chain (zero frontier steering)
+    for c in abstention_cases:
+        res = ollama_chat(
+            model,
+            messages=[{"role": "user", "content": c["prompt"]}],
+            tools=AGENT_TOOLS,
+            options=opts,
+            think=think,
+            base_url=base_url,
+        )
+        _record_tps(res)
+        tcalls = res.get("tool_calls") or []
+        success = len(tcalls) == 0 and len(res["content"].strip()) > 5
+        if success:
+            abstention_passed += 1
+        details.append({
+            "case": c["id"],
+            "category": "abstention",
+            "passed": success,
+            "over_triggered": len(tcalls) > 0,
+            "tool_calls": tcalls,
+            "elapsed_sec": res["elapsed_sec"],
+            "starved": res.get("starved", False),
+            "error": res.get("error"),
+        })
+
+    # Case 11: 2-Step Autonomous Tool Chain (exact single call per step, zero frontier steering)
     chain_msgs = [{
         "role": "user",
         "content": (
@@ -398,11 +453,14 @@ def eval_tool_calling(
     }]
     r_step1 = ollama_chat(model, chain_msgs, tools=AGENT_TOOLS, options=opts, think=think, base_url=base_url)
     _record_tps(r_step1)
-    fn1, args1 = _extract_first_tool_call(r_step1.get("tool_calls") or [])
-    step1_ok = fn1 == "query_device_telemetry" and args1 is not None and (
+    fn1, args1, extra1 = _extract_exact_single_tool_call(r_step1.get("tool_calls") or [])
+    if extra1:
+        extra_calls_rejected += 1
+    step1_ok = (not extra1) and fn1 == "query_device_telemetry" and args1 is not None and (
         args1.get("node_name") == "workstation" and args1.get("metric") == "gpu_temp"
     )
     step2_ok = False
+    extra2 = False
     r_step2 = {"tool_calls": [], "elapsed_sec": 0.0, "starved": False, "error": None}
     if step1_ok:
         chain_msgs.append({"role": "assistant", "content": r_step1["content"], "tool_calls": r_step1["tool_calls"]})
@@ -412,8 +470,10 @@ def eval_tool_calling(
         })
         r_step2 = ollama_chat(model, chain_msgs, tools=AGENT_TOOLS, options=opts, think=think, base_url=base_url)
         _record_tps(r_step2)
-        fn2, args2 = _extract_first_tool_call(r_step2.get("tool_calls") or [])
-        step2_ok = fn2 == "dispatch_alert" and args2 is not None and (
+        fn2, args2, extra2 = _extract_exact_single_tool_call(r_step2.get("tool_calls") or [])
+        if extra2:
+            extra_calls_rejected += 1
+        step2_ok = (not extra2) and fn2 == "dispatch_alert" and args2 is not None and (
             args2.get("severity") == "critical"
             and isinstance(args2.get("tags"), list)
             and "thermal" in {str(x).lower() for x in args2.get("tags", [])}
@@ -421,19 +481,21 @@ def eval_tool_calling(
         )
     chain_ok = step1_ok and step2_ok
     if chain_ok:
-        passed += 1
+        action_passed += 1
     details.append({
-        "case": "09_two_step_autonomous_chain",
+        "case": "11_two_step_autonomous_chain",
+        "category": "action",
         "passed": chain_ok,
         "step1_ok": step1_ok,
         "step2_ok": step2_ok,
+        "extra_calls_rejected": extra1 or extra2,
         "tool_calls": (r_step1.get("tool_calls") or []) + (r_step2.get("tool_calls") or []),
         "elapsed_sec": round(r_step1["elapsed_sec"] + r_step2["elapsed_sec"], 2),
         "starved": r_step1.get("starved", False) or r_step2.get("starved", False),
         "error": r_step1.get("error") or r_step2.get("error"),
     })
 
-    # Case 10: Mechanical Validator-Error Self-Correction (no frontier babysitter)
+    # Case 12: Mechanical Validator-Error Self-Correction (exact single repaired call)
     repair_msgs = [
         {
             "role": "user",
@@ -464,33 +526,103 @@ def eval_tool_calling(
     ]
     r_fix = ollama_chat(model, repair_msgs, tools=AGENT_TOOLS, options=opts, think=think, base_url=base_url)
     _record_tps(r_fix)
-    fn_fix, args_fix = _extract_first_tool_call(r_fix.get("tool_calls") or [])
-    fix_ok = fn_fix == "log_crm_interaction" and args_fix is not None and (
+    fn_fix, args_fix, extra_fix = _extract_exact_single_tool_call(r_fix.get("tool_calls") or [])
+    if extra_fix:
+        extra_calls_rejected += 1
+    fix_ok = (not extra_fix) and fn_fix == "log_crm_interaction" and args_fix is not None and (
         "marcus vance" in str(args_fix.get("contact_name", "")).lower()
         and args_fix.get("channel") == "linkedin"
         and len(str(args_fix.get("summary", "")).strip()) >= 4
         and _is_strict_int(args_fix.get("follow_up_days")) and args_fix.get("follow_up_days") == 5
     )
     if fix_ok:
-        passed += 1
+        action_passed += 1
     details.append({
-        "case": "10_validator_error_self_repair",
+        "case": "12_validator_error_self_repair",
+        "category": "action",
         "passed": fix_ok,
+        "extra_calls_rejected": extra_fix,
         "tool_calls": r_fix.get("tool_calls") or [],
         "elapsed_sec": r_fix["elapsed_sec"],
         "starved": r_fix.get("starved", False),
         "error": r_fix.get("error"),
     })
 
-    total_cases = len(single_turn_cases) + 2
+    action_total = len(action_cases) + 2
+    abstention_total = len(abstention_cases)
+    total_cases = action_total + abstention_total
+    total_passed = action_passed + abstention_passed
     return {
         "supported": any(len(d["tool_calls"]) > 0 for d in details),
-        "passed": passed,
+        "passed": total_passed,
         "total": total_cases,
-        "score_pct": round((passed / total_cases) * 100, 1),
+        "score_pct": round((total_passed / total_cases) * 100, 1),
+        "action_passed": action_passed,
+        "action_total": action_total,
+        "action_score_pct": round((action_passed / action_total) * 100, 1),
+        "abstention_passed": abstention_passed,
+        "abstention_total": abstention_total,
+        "abstention_score_pct": round((abstention_passed / abstention_total) * 100, 1),
+        "extra_calls_rejected": extra_calls_rejected,
         "avg_tps": round(sum(total_tps) / len(total_tps), 2) if total_tps else 0.0,
         "starved": starved_any,
         "details": details,
+    }
+
+
+def eval_tool_calling(
+    model: str,
+    think: Optional[bool] = None,
+    base_url: Optional[str] = None,
+    num_ctx: int = 4096,
+    runs: int = 1,
+    temperature: float = 0.0,
+) -> dict:
+    """Run Track 1 once or N times and aggregate action accuracy, no-call restraint, and consistency."""
+    runs = max(1, int(runs))
+    if runs == 1:
+        res = eval_tool_calling_once(model, think=think, base_url=base_url, num_ctx=num_ctx, temperature=temperature)
+        res["runs"] = 1
+        res["tool_temp"] = temperature
+        return res
+
+    per_run = [
+        eval_tool_calling_once(model, think=think, base_url=base_url, num_ctx=num_ctx, temperature=temperature)
+        for _ in range(runs)
+    ]
+    action_passed = sum(r["action_passed"] for r in per_run)
+    action_total = sum(r["action_total"] for r in per_run)
+    abstention_passed = sum(r["abstention_passed"] for r in per_run)
+    abstention_total = sum(r["abstention_total"] for r in per_run)
+    total_passed = action_passed + abstention_passed
+    total_cases = action_total + abstention_total
+    tps_vals = [r["avg_tps"] for r in per_run if r["avg_tps"] > 0]
+    return {
+        "runs": runs,
+        "tool_temp": temperature,
+        "supported": any(r["supported"] for r in per_run),
+        "passed": total_passed,
+        "total": total_cases,
+        "score_pct": round((total_passed / total_cases) * 100, 1),
+        "action_passed": action_passed,
+        "action_total": action_total,
+        "action_score_pct": round((action_passed / action_total) * 100, 1),
+        "abstention_passed": abstention_passed,
+        "abstention_total": abstention_total,
+        "abstention_score_pct": round((abstention_passed / abstention_total) * 100, 1),
+        "extra_calls_rejected": sum(r["extra_calls_rejected"] for r in per_run),
+        "avg_tps": round(sum(tps_vals) / len(tps_vals), 2) if tps_vals else 0.0,
+        "starved": any(r["starved"] for r in per_run),
+        "per_run_scores": [
+            {
+                "run": i + 1,
+                "action": f"{r['action_passed']}/{r['action_total']}",
+                "abstention": f"{r['abstention_passed']}/{r['abstention_total']}",
+                "extra_calls_rejected": r["extra_calls_rejected"],
+            }
+            for i, r in enumerate(per_run)
+        ],
+        "details": per_run[-1]["details"],
     }
 
 
@@ -815,6 +947,18 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Context window passed to Ollama (default: 4096 to stay 100%% GPU on 8GB cards).",
     )
     parser.add_argument(
+        "--runs",
+        type=int,
+        default=1,
+        help="Number of repeated Track 1 tool-calling runs per model to measure consistency (default: 1).",
+    )
+    parser.add_argument(
+        "--tool-temp",
+        type=float,
+        default=0.0,
+        help="Sampling temperature for Track 1 tool-calling runs (default: 0.0; try 0.2 with --runs 3).",
+    )
+    parser.add_argument(
         "--output",
         default=None,
         help="Path to write JSON results (default: results/run_<timestamp>.json).",
@@ -829,8 +973,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
 def format_markdown_table(summary: list[dict]) -> str:
     lines = [
-        "| Model | Track 1: Tool Calling | Track 2: Self-Healing (T1 -> T2) | Track 3: Bayesian Math | CoT Starved? | Composite | Offload Verdict |",
-        "| :--- | :---: | :---: | :---: | :---: | :---: | :--- |",
+        "| Model | Action Tools | No-Call Restraint | Extra Calls | Code (T1->T2) | Math | Starved? | Composite | Verdict |",
+        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |",
     ]
     for row in summary:
         tc = row["tool_calling"]
@@ -838,8 +982,11 @@ def format_markdown_table(summary: list[dict]) -> str:
         mv = row["bayesian_math"]
         starved = "Yes" if (tc.get("starved") or sh["turn1_starved"] or sh["turn2_starved"] or mv["starved"]) else "No"
         verdict = row.get("offload_verdict") or classify_offload_readiness(tc, sh, mv, row["composite_agent_score"])
+        act_str = f"{tc['action_passed']}/{tc['action_total']} ({tc['action_score_pct']}%)" if "action_passed" in tc else f"{tc['passed']}/{tc['total']}"
+        abs_str = f"{tc['abstention_passed']}/{tc['abstention_total']} ({tc['abstention_score_pct']}%)" if "abstention_passed" in tc else "n/a"
+        extra_str = str(tc.get("extra_calls_rejected", 0))
         lines.append(
-            f"| `{row['model']}` | {tc['passed']}/{tc['total']} ({tc['score_pct']}%) | "
+            f"| `{row['model']}` | {act_str} | {abs_str} | {extra_str} | "
             f"{sh['turn1_passed']}/10 -> {sh['turn2_passed']}/10 (+{sh['healed_delta']}) | "
             f"{mv['passed']}/{mv['total']} ({mv['score_pct']}%) | {starved} | **{row['composite_agent_score']}%** | {verdict} |"
         )
@@ -873,29 +1020,44 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 1
 
     print("=" * 72)
-    print(f"LOCAL AGENTIC BENCHMARK SUITE | endpoint={base_url} | think={args.think} | ctx={args.num_ctx}")
+    print(f"LOCAL AGENTIC BENCHMARK SUITE | endpoint={base_url} | think={args.think} | ctx={args.num_ctx} | runs={args.runs} | tool_temp={args.tool_temp}")
     print("=" * 72)
 
     summary = []
     for idx, m in enumerate(models):
         print(f"\n>>> Benchmarking Model: {m}")
-        tc = eval_tool_calling(m, think=think_flag, base_url=base_url, num_ctx=args.num_ctx)
-        print(f"  [Track 1 - Tool Calling]  Score: {tc['passed']}/{tc['total']} ({tc['score_pct']}%) | TPS: {tc['avg_tps']} | Supported: {tc['supported']}")
+        tc = eval_tool_calling(
+            m,
+            think=think_flag,
+            base_url=base_url,
+            num_ctx=args.num_ctx,
+            runs=args.runs,
+            temperature=args.tool_temp,
+        )
+        print(
+            f"  [Track 1A - Action Tools]    {tc['action_passed']}/{tc['action_total']} ({tc['action_score_pct']}%) | "
+            f"Extra Calls Rejected: {tc['extra_calls_rejected']} | TPS: {tc['avg_tps']}"
+        )
+        print(
+            f"  [Track 1B - No-Call Restr.]  {tc['abstention_passed']}/{tc['abstention_total']} ({tc['abstention_score_pct']}%)"
+        )
 
         sh = eval_self_healing_code(m, think=think_flag, base_url=base_url, num_ctx=args.num_ctx)
-        print(f"  [Track 2 - Self-Healing]  Turn 1: {sh['turn1_passed']}/10 -> Turn 2: {sh['turn2_passed']}/10 (Delta: +{sh['healed_delta']}) | TPS: {sh['turn1_tps']}")
+        print(f"  [Track 2 - Self-Healing]     Turn 1: {sh['turn1_passed']}/10 -> Turn 2: {sh['turn2_passed']}/10 (Delta: +{sh['healed_delta']}) | TPS: {sh['turn1_tps']}")
 
         mv = eval_math_verification(m, think=think_flag, base_url=base_url, num_ctx=args.num_ctx)
-        print(f"  [Track 3 - Bayesian Math] Score: {mv['passed']}/5 ({mv['score_pct']}%) | TPS: {mv['tps']}")
+        print(f"  [Track 3 - Bayesian Math]    Score: {mv['passed']}/5 ({mv['score_pct']}%) | TPS: {mv['tps']}")
 
         composite = round((tc["score_pct"] + sh["turn2_score_pct"] + mv["score_pct"]) / 3.0, 1)
         verdict = classify_offload_readiness(tc, sh, mv, composite)
-        print(f"  [Composite / Verdict]     {composite}% -> {verdict}")
+        print(f"  [Composite / Verdict]        {composite}% -> {verdict}")
         summary.append({
             "model": m,
             "endpoint": base_url,
             "think": args.think,
             "num_ctx": args.num_ctx,
+            "runs": args.runs,
+            "tool_temp": args.tool_temp,
             "tool_calling": tc,
             "self_healing": sh,
             "bayesian_math": mv,

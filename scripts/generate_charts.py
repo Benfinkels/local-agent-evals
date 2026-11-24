@@ -429,9 +429,184 @@ def make_showdown_8gb_charts() -> None:
     plt.close(fig)
 
 
+def make_ep1_9model_charts() -> None:
+    """Plot Episode 1 (9 models, 3 runs @ temp=0.2): Action vs Restraint + Speed vs Composite."""
+    ep1_path = RESULTS / "showdown_8gb_ep1_3runs.json"
+    if not ep1_path.exists():
+        return
+
+    rows = json.loads(ep1_path.read_text(encoding="utf-8"))
+    size_gb = {
+        "gemma4:e2b-it-q4_K_M": 7.2,
+        "ministral-3:8b": 6.0,
+        "ministral-3:3b": 3.0,
+        "qwen3.5:9b": 6.6,
+        "qwen3:8b": 5.2,
+        "llama3.1:8b": 4.9,
+        "nemotron-3-nano:4b": 2.8,
+        "granite4:3b-h": 1.9,
+        "granite4:micro": 2.1,
+    }
+    verdict_colors = {
+        "Unattended Ready": "#10b981",
+        "Validator + Retry": "#f59e0b",
+        "Net Frontier Tax": "#ef4444",
+    }
+
+    def short_name(m: str) -> str:
+        return m.replace("-it-q4_K_M", "").replace(":latest", "")
+
+    # Sort descending by composite, then tool score, then speed
+    rows.sort(
+        key=lambda r: (
+            r["composite_agent_score"],
+            r["tool_calling"]["score_pct"],
+            r["tool_calling"]["avg_tps"],
+        ),
+        reverse=True,
+    )
+
+    from matplotlib.patches import Patch
+
+    # Chart 1: Action Tool Accuracy vs No-Call Restraint (3 runs @ temp=0.2)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13.2, 5.8), sharey=True)
+    fig.suptitle(
+        "8GB GPU Tool Calling vs. No-Call Restraint (9 Models, 3 Runs @ temp=0.2, Exact Call Count)",
+        fontsize=12.5,
+        fontweight="bold",
+        y=0.97,
+    )
+
+    labels = [f"{short_name(r['model'])} ({size_gb.get(r['model'], 4.0):.1f} GB)" for r in rows][::-1]
+    act_pcts = [r["tool_calling"]["action_score_pct"] for r in rows][::-1]
+    act_raw = [f"{r['tool_calling']['action_passed']}/{r['tool_calling']['action_total']}" for r in rows][::-1]
+    extras = [r["tool_calling"]["extra_calls_rejected"] for r in rows][::-1]
+    abs_pcts = [r["tool_calling"]["abstention_score_pct"] for r in rows][::-1]
+    abs_raw = [f"{r['tool_calling']['abstention_passed']}/{r['tool_calling']['abstention_total']}" for r in rows][::-1]
+    y = np.arange(len(labels))
+
+    act_cols = ["#10b981" if p >= 95 else ("#f59e0b" if p >= 80 else "#ef4444") for p in act_pcts]
+    abs_cols = ["#10b981" if p == 100 else ("#f59e0b" if p >= 75 else "#ef4444") for p in abs_pcts]
+
+    b1 = ax1.barh(y, act_pcts, color=act_cols, height=0.62)
+    ax1.set_yticks(y)
+    ax1.set_yticklabels(labels, fontsize=9.5)
+    ax1.set_xlim(0, 132)
+    ax1.set_xlabel("Pass Rate (%)", fontsize=10, fontweight="bold")
+    ax1.set_title("Track 1A: Action Tool Calls (21 checks / model)", fontsize=10.8, pad=8)
+    ax1.grid(axis="y", visible=False)
+    for bar, pct, raw, ex in zip(b1, act_pcts, act_raw, extras):
+        note = f"  ({ex} extra calls!)" if ex > 0 else ""
+        ax1.text(
+            pct + 1.8,
+            bar.get_y() + bar.get_height() / 2,
+            f"{raw} ({pct:.0f}%){note}",
+            va="center",
+            fontsize=8.6,
+            fontweight="bold",
+            color="#b91c1c" if ex > 0 else "#111827",
+        )
+
+    b2 = ax2.barh(y, abs_pcts, color=abs_cols, height=0.62)
+    ax2.set_xlim(0, 128)
+    ax2.set_xlabel("Restraint Rate (%)", fontsize=10, fontweight="bold")
+    ax2.set_title("Track 1B: No-Call Restraint (15 traps / model)", fontsize=10.8, pad=8)
+    ax2.grid(axis="y", visible=False)
+    for bar, pct, raw in zip(b2, abs_pcts, abs_raw):
+        ax2.text(
+            pct + 1.8,
+            bar.get_y() + bar.get_height() / 2,
+            f"{raw} ({pct:.0f}%)",
+            va="center",
+            fontsize=8.8,
+            fontweight="bold",
+            color="#b91c1c" if pct < 75 else "#111827",
+        )
+
+    legend_handles = [
+        Patch(facecolor="#10b981", label="Rock Solid (95-100%)"),
+        Patch(facecolor="#f59e0b", label="Borderline (75-94%)"),
+        Patch(facecolor="#ef4444", label="Trigger-Happy / Flaky (<75%)"),
+    ]
+    fig.legend(handles=legend_handles, loc="lower center", ncol=3, frameon=False, fontsize=9.2, bbox_to_anchor=(0.5, 0.01))
+    plt.tight_layout(rect=[0, 0.06, 1, 0.92])
+    fig.savefig(OUT_DIR / "ep1_action_vs_restraint.png", dpi=170)
+    plt.close(fig)
+
+    # Chart 2: Speed vs Composite Score across all 9 models (bubble size = model GB)
+    fig, ax = plt.subplots(figsize=(10.4, 6.2))
+    ax.axhspan(85, 103, xmin=0.0, xmax=1.0, color="#10b981", alpha=0.07, zorder=0)
+    ax.axhline(85, color="#10b981", linestyle=":", linewidth=1.2, zorder=1)
+    ax.text(8, 100.5, "Unattended Ready Zone (85%+ Composite, 0 Starvation)", ha="left", fontsize=8.8, color="#047857", fontweight="bold")
+
+    offsets = {
+        "ministral-3:8b": (-14, 18, "right"),
+        "nemotron-3-nano:4b": (0, 22, "center"),
+        "qwen3:8b": (16, 4, "left"),
+        "qwen3.5:9b": (16, 0, "left"),
+        "gemma4:e2b-it-q4_K_M": (-16, -6, "right"),
+        "ministral-3:3b": (-8, 22, "right"),
+        "llama3.1:8b": (-16, -24, "right"),
+        "granite4:micro": (0, -26, "center"),
+        "granite4:3b-h": (-14, 12, "right"),
+    }
+
+    for r in rows:
+        m = r["model"]
+        tps = r["tool_calling"]["avg_tps"]
+        sc = r["composite_agent_score"]
+        gb = size_gb.get(m, 4.0)
+        col = verdict_colors.get(r["offload_verdict"], "#64748b")
+        ax.scatter(
+            tps,
+            sc,
+            s=gb * 78,
+            color=col,
+            alpha=0.88,
+            edgecolors="#111827",
+            linewidth=1.0,
+            zorder=4,
+        )
+        dx, dy, ha = offsets.get(m, (10, 8, "left"))
+        label_extra = " | 20% restraint!" if m == "llama3.1:8b" else ""
+        ax.annotate(
+            f"{short_name(m)}\n{sc:.1f}% | {tps:.0f} t/s | {gb:.1f} GB{label_extra}",
+            (tps, sc),
+            xytext=(dx, dy),
+            textcoords="offset points",
+            ha=ha,
+            va="center",
+            fontsize=8.2,
+            fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="#e5e7eb", alpha=0.90),
+            zorder=5,
+        )
+
+    v_handles = [
+        Patch(facecolor="#10b981", label="Unattended Ready"),
+        Patch(facecolor="#f59e0b", label="Validator + Retry"),
+        Patch(facecolor="#ef4444", label="Net Frontier Tax"),
+    ]
+    ax.set_xlim(5, 154)
+    ax.set_ylim(42, 103)
+    ax.set_xlabel("Generation Speed on RTX 2080 8GB (tokens/sec)", fontsize=10.5, fontweight="bold")
+    ax.set_ylabel("Composite Agent Score (%)", fontsize=10.5, fontweight="bold")
+    ax.set_title(
+        "9-Model 8GB GPU Leaderboard: Speed vs. Agent Reliability (3 Runs @ temp=0.2)",
+        fontsize=12.2,
+        fontweight="bold",
+        pad=12,
+    )
+    ax.legend(handles=v_handles, loc="lower left", frameon=True, facecolor="white", edgecolor="#e5e7eb", fontsize=9)
+    plt.tight_layout()
+    fig.savefig(OUT_DIR / "ep1_9model_speed_vs_score.png", dpi=170)
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     make_model_scorecard_chart()
     make_thinking_starvation_chart()
     make_speculative_4090_chart()
     make_showdown_8gb_charts()
+    make_ep1_9model_charts()
     print("Generated charts in", OUT_DIR)

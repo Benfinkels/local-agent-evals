@@ -8,20 +8,21 @@
 
 Most benchmarks grade chat vibes or trivia. This zero-dependency Python harness runs real `unittest` pass/fail checks on any local Ollama model to catch the three ways small models break in production: **thinking forever until they output nothing**, **sloppy tool calls**, and **failing to fix their own bugs when given a test error**.
 
-![Local Agentic Benchmark Scorecard](docs/charts/model_scorecard.png)
+![8GB GPU Tool Calling vs. No-Call Restraint](docs/charts/ep1_action_vs_restraint.png)
 
 ## Quick Start (Test Your Own Ollama Models in 60 Seconds)
 
 ```bash
 git clone https://github.com/Benfinkels/local-agent-evals.git
 cd local-agent-evals
-python -m evals.runner --models gemma4:e2b qwen3.5:9b --think false
+python -m evals.runner --models ministral-3:8b nemotron-3-nano:4b --think false --runs 3 --tool-temp 0.2
 ```
 
 - Uses **Python standard library only** to run live evals (no SDK dependencies required).
 - Point at a remote Ollama box with `--base-url http://<host>:11434` (or `$OLLAMA_HOST`).
-- Compare reasoning regimes directly with `--think auto | true | false`.
+- Measure consistency across repeated trials with `--runs 3 --tool-temp 0.2`, and compare thinking modes with `--think auto | true | false`.
 - Prints a copy-pasteable Markdown leaderboard and writes JSON to `results/run_<timestamp>.json` (never auto-pulls models or overwrites committed baselines).
+- **Want your GPU/model added to the leaderboard?** Run `--runs 3 --tool-temp 0.2` and open an issue or PR with your Markdown table and hardware specs!
 
 ### Offline Harness Verification (No GPU Required)
 ```bash
@@ -31,7 +32,38 @@ PYTHONPATH=. pytest tests/ -v
 
 ---
 
-## New: 8GB Autonomous Offload Showdown (10-Case Tool Suite, Zero Frontier Babysitter)
+## Episode 1 Leaderboard: 9 Models on an 8GB RTX 2080 (3 Runs @ `temp=0.2`, Exact Call Count)
+
+![9-Model 8GB GPU Speed vs. Agent Reliability](docs/charts/ep1_9model_speed_vs_score.png)
+
+Upgraded directly from community feedback on Reddit:
+- **Exact single-call enforcement** *(thanks `u/MongooseWonderful198`)*: positive, chain, and repair steps now require `len(tool_calls) == 1` — any model that bundles an extra unwanted tool call fails immediately (verified by a dedicated negative unit test).
+- **Standalone No-Call Restraint score** *(thanks `u/AgentSearchEngine`)*: Track 1 is now split cleanly into **Action Tools (`7` cases × 3 runs = `21` checks)** vs. **No-Call Restraint (`5` traps × 3 runs = `15` checks)** so trigger-happy models stand out immediately.
+
+All 9 models ran on a single **8GB RTX 2080** at `num_ctx=4096`, `think=False`, `runs=3`, `tool_temp=0.2` ([`results/showdown_8gb_ep1_3runs.json`](results/showdown_8gb_ep1_3runs.json)):
+
+| Model | Size | Speed | Action Tools (`21`) | No-Call Restraint (`15`) | Extra Calls | Code (`T1->T2`) | Math (`5`) | **Composite** | **Offload Verdict** |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
+| **`ministral-3:8b`** | 6.0 GB | 69 t/s | **21/21 (100%)** | **15/15 (100%)** | 0 | `6->8 (+2)` | **5/5** | **93.3%** | **Unattended Ready** |
+| **`nemotron-3-nano:4b`** | **2.8 GB** | **108 t/s** | **21/21 (100%)** | **15/15 (100%)** | 0 | `7->7 (+0)` | **5/5** | **90.0%** | **Unattended Ready** |
+| **`qwen3:8b`** | 5.2 GB | 69 t/s | **21/21 (100%)** | **15/15 (100%)** | 0 | `7->7 (+0)` | **5/5** | **90.0%** | **Unattended Ready** |
+| **`qwen3.5:9b`** (`think=False`) | 6.6 GB | 23 t/s | **21/21 (100%)** | **15/15 (100%)** | 0 | `6->6 (+0)` | **5/5** | **86.7%** | **Unattended Ready** |
+| **`gemma4:e2b-it-q4_K_M`** | 7.2 GB | 67 t/s | 18/21 (85.7%) | **15/15 (100%)** | 0 | `6->6 (+0)` | **5/5** | **83.9%** | **Validator + Retry** |
+| **`ministral-3:3b`** | 3.0 GB | **134 t/s** | 20/21 (95.2%) | **15/15 (100%)** | 0 | `4->5 (+1)` | **5/5** | **82.4%** | **Validator + Retry** |
+| **`llama3.1:8b`** | 4.9 GB | 76 t/s | 16/21 (76.2%) | **3/15 (20.0%)** | **3** | `8->8 (+0)` | **5/5** | **77.6%** | **Net Frontier Tax** |
+| **`granite4:micro`** | 2.1 GB | 120 t/s | 20/21 (95.2%) | 9/15 (60.0%) | 0 | `5->5 (+0)` | **5/5** | **76.9%** | **Validator + Retry** |
+| **`granite4:3b-h`** | **1.9 GB** | 123 t/s | **21/21 (100%)** | 12/15 (80.0%) | 0 | `4->4 (+0)` | 1/5 | **50.6%** | **Net Frontier Tax** |
+
+### Key Findings From the Hardened Multi-Run Suite
+- **The exact extra-call bug caught `llama3.1:8b` 3/3 times:** On the 2-step chain (*"check GPU temp, and if >85C send an alert"*), `llama3.1:8b` blindly fired **both** `query_device_telemetry` and `dispatch_alert` simultaneously before even reading the temperature — and over-triggered tools on **12/15** no-call traps (`20%` restraint), even calling `dispatch_alert` when asked *"What does HTTP 429 mean?"*
+- **`nemotron-3-nano:4b` (2.8 GB, 108 t/s) is the new small-footprint champ:** Went **36/36** across 3 runs (`21/21` tools, `15/15` restraint, `0` extra calls) + `7/10` code + `5/5` math (**90.0%**), tying `qwen3:8b` at half the VRAM and 1.6× the speed.
+- **`ministral-3:8b` (6.0 GB, 69 t/s) took #1 overall (`93.3%`):** Perfect **36/36** on tools + restraint AND healed `6->8/10` on Turn-2 code.
+- **`qwen3:8b` beat `qwen3.5:9b` on an 8GB card:** Higher composite (`90.0%` vs `86.7%`) and **3× faster** (`69` vs `23 tok/s`) because `5.2 GB` leaves comfortable KV-cache headroom on 8GB VRAM.
+- **Granite 4 models are fast & accurate on schemas, but trigger-happy:** `granite4:3b-h` went `21/21` on actions (`123 t/s`), yet fired a real `dispatch_alert` when asked to write sample documentation text (`12/15` restraint).
+
+---
+
+## Previous Run: 8GB Autonomous Offload Showdown (v2 Single-Run + `qwen3.5` Thinking Toggle)
 
 ![8GB GPU Autonomous Agent Showdown](docs/charts/showdown_8gb_scorecard.png)
 
