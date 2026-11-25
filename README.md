@@ -51,6 +51,14 @@ Head-to-head across all three deterministic suites (`runner.py` tools + restrain
 - **`gemma4:26B` hit `161–170 t/s`** and matched `12/12` briefing + `6/6` shuffle (`0` hijacks), dropping only 2 points on Turn-2 regex code self-healing (`8→8/10`).
 - **`inkling-2-mini` has a thinking-mode catch-22 on Ollama `v0.40.18`:** With `think=auto` it nailed `6/6` (`18/18`, `0` hijacks) on the 25-email shuffle and `10/12` (`0` FP) on the morning brief, but ran at half the speed (`60 t/s`) and starved the 2,048-token code/math caps to `0/10` and `0/5` (+ 3 extra unwanted tool calls). Forcing `think=false` broke structured JSON (`2/12`) and triggered `HTTP 500: prediction aborted, token repeat limit reached`.
 
+### Same GGUF Blobs: Ollama `v0.40.18` vs. `llama-server` (`b12734`, `--api openai`)
+Pointing raw `llama-server` directly at Ollama's exact same GGUF blobs on the RTX 4090 fixed both failures without downloading a single extra weight ([`llamacpp_nemotron_*.json`](results/llamacpp_nemotron_runner.json), [`llamacpp_inkling_b512_*.json`](results/llamacpp_inkling_b512_runner.json)):
+
+| Model (Exact Same GGUF Blob) | Ollama `v0.40.18` | `llama-server b12734` (`--api openai`) | Root Fix Unlocked by `llama-server` |
+| :--- | :--- | :--- | :--- |
+| **`nemotron-3.5-bolt`** *(22.02 GB GGUF)* | Spilled **`48% CPU / 52% GPU`** (`16 t/s` prefill — unusable on Windows desktop 4090) | **`100% GPU` (`22.7 GB`), `99–109 t/s`**, **`93.3%`** runner, **`12/12`** brief, **`6/6`** shuffle (`0` hijacks) | Skipped Ollama's forced `1.73 GB` vision projector + `1.0 GB` drafter so the base model fit 100% in VRAM |
+| **`inkling-2-mini`** *(17.63 GB GGUF)* | **`30.6%`** (`think=auto`, starved `0/10` code, `0/5` math) / **`2/12`** (`think=false`, `HTTP 500` loop) | **`100.0%` sweep (`10/10` Turn-1 code, `12/12` brief, `6/6` shuffle, `0` hijacks, `67–71 t/s`)** *(1-run pass)* | Hard **`--reasoning-budget 512`** + native `--jinja` let it reason without starving the 2k output cap |
+
 ### Ollama `num_ctx` Reload vs. Multi-Prompt Cache Benchmark ([`evals/ctx_reload_eval.py`](evals/ctx_reload_eval.py))
 Verified on RTX 4090 (`Ollama v0.40.11`, [`results/ctx_reload_4090_nov2026.json`](results/ctx_reload_4090_nov2026.json)):
 - **Switching `num_ctx` (`2048 <-> 8192`) still forces a full model reload on 4/4 switches:** `2,468 ms` avg reload on `phi4-mini` and `4,996 ms` on `gemma4:26B` (vs. `2.2–2.6 ms` load when fixed).
