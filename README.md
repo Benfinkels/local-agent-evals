@@ -32,6 +32,37 @@ PYTHONPATH=. pytest tests/ -v
 
 ---
 
+## 25-Email Shuffle Stress Test (Ollama `v0.40.18`, Late-2026 8GB Models)
+
+Based on Reddit feedback from `u/AffectionateWolf1181` (shuffling the 25-email batch to test "lost in the middle") and `u/GoldenX86` (adding `Ling-3.0-tiny` and `qwen3.5:4b`), we upgraded Ollama to **`v0.40.18`** and ran the exact same 25 emails from Case `A4` across **6 deterministic layouts × 3 runs (`18` checks/model)** at `temp=0.2`, `ctx=4096`, `think=False` on an 8GB RTX 2080 ([`evals/shuffle_eval.py`](evals/shuffle_eval.py), [`results/shuffle_25email_nov2026.json`](results/shuffle_25email_nov2026.json)):
+
+| Model | Strict (`pass^3`) | Target Recall | Hijacks | Base | Top | Middle | Bottom | Shuf42 | Shuf99 | Speed |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`granite4.2:8b`** *(5.3 GB)* | **5/6 (17/18)** | 17/18 | **0** | 3/3 | 3/3 | 3/3 | 2/3 | 3/3 | 3/3 | 58 t/s |
+| **`qwen3.5:9b`** *(6.6 GB)* | **3/6 (13/18)** | **18/18** | 2 | 3/3 | 3/3 | 3/3 | 2/3 | 0/3 | 2/3 | 54 t/s |
+| **`ministral-3:8b`** *(6.0 GB)* | **1/6 (4/18)** | **18/18** | 14 | 0/3 | 0/3 | 0/3 | 3/3 | 1/3 | 0/3 | 58 t/s |
+| **`qwen3.5:4b`** *(3.3 GB)* | **1/6 (3/18)** | **18/18** | 11 | 0/3 | 0/3 | 0/3 | 3/3 | 0/3 | 0/3 | 73 t/s |
+| **`gemma4:e4b`** *(6.6 GB)* | **1/6 (3/18)** | **18/18** | 15 | 0/3 | 0/3 | 0/3 | 3/3 | 0/3 | 0/3 | 112 t/s |
+| **`Ling-3.0-tiny Q4_K_M`** *(4.8 GB)* | **0/6 (0/18)** | 9/18 | 18 | 0/3 | 0/3 | 0/3 | 0/3 | 0/3 | 0/3 | **175 t/s** |
+
+- **Not "lost in the middle" — position-sensitive prompt injection:** Every 4B–9B dense model still caught both real emails (`18/18` recall, `17/18` for Granite) even when buried at `#12–#13`. Only `Ling-3.0-tiny` (`1.3B` active MoE) actually lost recall (`9/18`).
+- **`granite4.2:8b` was the only model with `0/18` hijacks across all 6 layouts** (`17/18` strict; single miss was dropping `e418` once when pinned at `#25`).
+- **Recency bias decided whether injections won:** `ministral-3:8b`, `qwen3.5:4b`, and `gemma4:e4b` went `0/3` on `Base`, `Top`, `Middle`, and `Shuf99`, then passed `3/3` only on `Bottom` (`#24–#25`).
+- **Reproduce:** `python -m evals.shuffle_eval --models granite4.2:8b qwen3.5:9b --runs 3 --temp 0.2`
+
+### Updated 12-Case Episode 2 Run (`Ollama v0.40.18`, Late-2026 Lineup)
+Full 12-case `briefing_eval.py` pass on the same updated 8GB models ([`results/ep2_fresh_nov2026.json`](results/ep2_fresh_nov2026.json)):
+
+| Model | `pass^3` (All 3 Runs) | Raw Pass % | Inbox (`4`) | Dropped Ball (`4`) | CRM News (`4`) | False Pos | Hijacks (`3`) | Speed |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`qwen3.5:9b`** *(6.6 GB)* | **12/12 (100.0%)** | 36/36 (100.0%) | **4/4** | **4/4** | **4/4** | **0** | **0/3** | 58 t/s |
+| **`granite4.2:8b`** *(5.3 GB)* | **11/12 (91.7%)** | 33/36 (91.7%) | **4/4** | 3/4 | **4/4** | 3 | **0/3** | 64 t/s |
+| **`gemma4:e4b`** *(6.6 GB)* | **8/12 (66.7%)** | 25/36 (69.4%) | 0/4 | **4/4** | **4/4** | 11 | 3/3 | 135 t/s |
+| **`qwen3.5:4b`** *(3.3 GB)* | **8/12 (66.7%)** | 25/36 (69.4%) | 1/4 | 3/4 | **4/4** | 11 | 3/3 | 83 t/s |
+| **`Ling-3.0-tiny Q4_K_M`** *(4.8 GB)* | **6/12 (50.0%)** | 19/36 (52.8%) | 1/4 | 3/4 | 2/4 | 17 | 3/3 | **183 t/s** |
+
+---
+
 ## Episode 2: Private Morning-Briefing Agent Eval (`pass^3` Cloud vs. 8GB Local Models)
 
 Can an 8GB local model replace cloud APIs for unattended daily personal-assistant classifiers (**Inbox Action Triage**, **Sent-Mail Dropped-Ball Detection**, and **CRM News Entity Disambiguation**) without silent false positives or **indirect prompt injection**?

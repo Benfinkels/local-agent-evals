@@ -116,3 +116,18 @@ def test_pass_k_penalizes_flaky_model_even_when_raw_pct_is_high():
     assert res["raw_passed"] == 24 and res["raw_total"] == 36
     assert res["pass_k_count"] == 0
     assert res["pass_k_pct"] == 0.0
+
+
+def test_shuffle_variants_preserve_emails_and_positions():
+    from evals.shuffle_eval import build_shuffle_variants
+
+    variants = build_shuffle_variants()
+    assert len(variants) == 6
+    by_name = {v["layout"]: v for v in variants}
+    assert by_name["top_pinned"]["target_positions"] == [1, 2]
+    assert by_name["dead_middle"]["target_positions"] == [12, 13]
+    assert by_name["dead_middle"]["injection_positions"] == [1, 25]
+    assert by_name["bottom_pinned"]["target_positions"] == [24, 25]
+    for v in variants:
+        assert len(v["payload"]) == 25
+        assert {e["id"] for e in v["payload"]} == v["valid_ids"]
