@@ -38,13 +38,149 @@ def normalize_ollama_url(url: Optional[str] = None) -> str:
 OLLAMA_BASE = normalize_ollama_url()
 
 
-def list_local_ollama_models(base_url: Optional[str] = None) -> list[str]:
-    """Return locally installed Ollama model names without pulling anything."""
-    url = f"{normalize_ollama_url(base_url or OLLAMA_BASE)}/api/tags"
+def _openai_v1_base(base_url: str) -> str:
+    norm = normalize_ollama_url(base_url)
+    return norm if norm.endswith("/v1") else f"{norm}/v1"
+
+
+def list_local_ollama_models(base_url: Optional[str] = None, api: str = "ollama") -> list[str]:
+    """Return locally installed model names from Ollama (/api/tags) or OpenAI-compatible (/v1/models)."""
+    base = normalize_ollama_url(base_url or OLLAMA_BASE)
+    if api == "openai":
+        url = f"{_openai_v1_base(base)}/models"
+        headers = {"Accept": "application/json"}
+        key = os.environ.get("OPENAI_API_KEY")
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return [m["id"] for m in data.get("data", []) if m.get("id")]
+    url = f"{base}/api/tags"
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=10) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     return [m["name"] for m in data.get("models", []) if m.get("name")]
+
+
+def _normalize_openai_messages(messages: list) -> list:
+    """Convert internal/Ollama tool-call history into strict OpenAI /v1/chat/completions format."""
+    out = []
+    last_call_id = "call_0"
+    for m in messages:
+        msg = dict(m)
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            norm_calls = []
+            for idx, tc in enumerate(msg["tool_calls"]):
+                fn = dict(tc.get("function") or {})
+                args = fn.get("arguments", {})
+                if not isinstance(args, str):
+                    args = json.dumps(args, ensure_ascii=False)
+                cid = tc.get("id") or f"call_{idx}"
+                last_call_id = cid
+                norm_calls.append({"id": cid, "type": "function", "function": {"name": fn.get("name", ""), "arguments": args}})
+            msg["tool_calls"] = norm_calls
+        elif msg.get("role") == "tool" and not msg.get("tool_call_id"):
+            msg["tool_call_id"] = last_call_id
+        out.append(msg)
+    return out
+
+
+def _openai_chat(
+    model: str,
+    messages: list,
+    tools: list = None,
+    options: dict = None,
+    timeout: int = 240,
+    think: Optional[bool] = None,
+    base_url: Optional[str] = None,
+) -> dict:
+    opts = options or {"temperature": 0.2, "num_predict": 2048}
+    payload: dict = {
+        "model": model,
+        "messages": _normalize_openai_messages(messages),
+        "stream": False,
+        "temperature": opts.get("temperature", 0.2),
+        "max_tokens": opts.get("num_predict", 2048),
+    }
+    if tools:
+        payload["tools"] = tools
+    if think is not None:
+        payload["chat_template_kwargs"] = {"enable_thinking": bool(think)}
+
+    endpoint = f"{_openai_v1_base(base_url or OLLAMA_BASE)}/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    key = os.environ.get("OPENAI_API_KEY")
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+
+    t0 = time.perf_counter()
+    try:
+        try:
+            req = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as he:
+            err_body = he.read().decode("utf-8", errors="replace")
+            if he.code == 400 and "chat_template_kwargs" in payload:
+                payload.pop("chat_template_kwargs", None)
+                req = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers)
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+            else:
+                raise RuntimeError(f"HTTP {he.code}: {err_body[:200]}") from he
+
+        elapsed = time.perf_counter() - t0
+        msg = (data.get("choices") or [{}])[0].get("message") or {}
+        content = msg.get("content", "") or ""
+        thinking = msg.get("reasoning_content") or msg.get("reasoning") or ""
+        think_match = re.search(r"<think>(.*?)</think>", content, re.DOTALL)
+        if think_match and not thinking:
+            thinking = think_match.group(1)
+            content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+
+        raw_calls = msg.get("tool_calls") or []
+        norm_calls = []
+        for tc in raw_calls:
+            fn = tc.get("function") or {}
+            args = fn.get("arguments", {})
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    pass
+            norm_calls.append({"id": tc.get("id"), "function": {"name": fn.get("name"), "arguments": args}})
+
+        usage = data.get("usage") or {}
+        eval_count = usage.get("completion_tokens", 0) or 0
+        timings = data.get("timings") or {}
+        tps = timings.get("predicted_per_second") or (eval_count / max(elapsed, 0.01))
+        return {
+            "ok": True,
+            "elapsed_sec": round(elapsed, 2),
+            "eval_tokens": eval_count,
+            "tps": round(float(tps), 2),
+            "content": content,
+            "thinking": thinking,
+            "thinking_chars": len(thinking),
+            "content_chars": len(content),
+            "tool_calls": norm_calls,
+            "starved": (len(thinking) > 500 and len(content.strip()) == 0 and not norm_calls),
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e),
+            "elapsed_sec": round(time.perf_counter() - t0, 2),
+            "eval_tokens": 0,
+            "tps": 0.0,
+            "content": "",
+            "thinking": "",
+            "thinking_chars": 0,
+            "content_chars": 0,
+            "tool_calls": [],
+            "starved": False,
+        }
 
 
 def ollama_chat(
@@ -56,7 +192,10 @@ def ollama_chat(
     think: Optional[bool] = None,
     base_url: Optional[str] = None,
     keep_alive: str = "5m",
+    api: str = "ollama",
 ) -> dict:
+    if api == "openai":
+        return _openai_chat(model, messages, tools=tools, options=options, timeout=timeout, think=think, base_url=base_url)
     payload = {
         "model": model,
         "messages": messages,
@@ -262,6 +401,7 @@ def eval_tool_calling_once(
     base_url: Optional[str] = None,
     num_ctx: int = 4096,
     temperature: float = 0.0,
+    api: str = "ollama",
 ) -> dict:
     """
     Run 12 deterministic Track 1 cases split cleanly into:
@@ -391,6 +531,7 @@ def eval_tool_calling_once(
             options=opts,
             think=think,
             base_url=base_url,
+            api=api,
         )
         _record_tps(res)
         tcalls = res.get("tool_calls") or []
@@ -425,6 +566,7 @@ def eval_tool_calling_once(
             options=opts,
             think=think,
             base_url=base_url,
+            api=api,
         )
         _record_tps(res)
         tcalls = res.get("tool_calls") or []
@@ -451,7 +593,7 @@ def eval_tool_calling_once(
             "critical alert with tag 'thermal' and suppress_if_quiet_hours set to false."
         ),
     }]
-    r_step1 = ollama_chat(model, chain_msgs, tools=AGENT_TOOLS, options=opts, think=think, base_url=base_url)
+    r_step1 = ollama_chat(model, chain_msgs, tools=AGENT_TOOLS, options=opts, think=think, base_url=base_url, api=api)
     _record_tps(r_step1)
     fn1, args1, extra1 = _extract_exact_single_tool_call(r_step1.get("tool_calls") or [])
     if extra1:
@@ -468,7 +610,7 @@ def eval_tool_calling_once(
             "role": "tool",
             "content": json.dumps({"node_name": "workstation", "metric": "gpu_temp", "value": 92, "unit": "C"}),
         })
-        r_step2 = ollama_chat(model, chain_msgs, tools=AGENT_TOOLS, options=opts, think=think, base_url=base_url)
+        r_step2 = ollama_chat(model, chain_msgs, tools=AGENT_TOOLS, options=opts, think=think, base_url=base_url, api=api)
         _record_tps(r_step2)
         fn2, args2, extra2 = _extract_exact_single_tool_call(r_step2.get("tool_calls") or [])
         if extra2:
@@ -524,7 +666,7 @@ def eval_tool_calling_once(
             ),
         },
     ]
-    r_fix = ollama_chat(model, repair_msgs, tools=AGENT_TOOLS, options=opts, think=think, base_url=base_url)
+    r_fix = ollama_chat(model, repair_msgs, tools=AGENT_TOOLS, options=opts, think=think, base_url=base_url, api=api)
     _record_tps(r_fix)
     fn_fix, args_fix, extra_fix = _extract_exact_single_tool_call(r_fix.get("tool_calls") or [])
     if extra_fix:
@@ -577,17 +719,18 @@ def eval_tool_calling(
     num_ctx: int = 4096,
     runs: int = 1,
     temperature: float = 0.0,
+    api: str = "ollama",
 ) -> dict:
     """Run Track 1 once or N times and aggregate action accuracy, no-call restraint, and consistency."""
     runs = max(1, int(runs))
     if runs == 1:
-        res = eval_tool_calling_once(model, think=think, base_url=base_url, num_ctx=num_ctx, temperature=temperature)
+        res = eval_tool_calling_once(model, think=think, base_url=base_url, num_ctx=num_ctx, temperature=temperature, api=api)
         res["runs"] = 1
         res["tool_temp"] = temperature
         return res
 
     per_run = [
-        eval_tool_calling_once(model, think=think, base_url=base_url, num_ctx=num_ctx, temperature=temperature)
+        eval_tool_calling_once(model, think=think, base_url=base_url, num_ctx=num_ctx, temperature=temperature, api=api)
         for _ in range(runs)
     ]
     action_passed = sum(r["action_passed"] for r in per_run)
@@ -745,6 +888,7 @@ def eval_self_healing_code(
     think: Optional[bool] = None,
     base_url: Optional[str] = None,
     num_ctx: int = 4096,
+    api: str = "ollama",
 ) -> dict:
     safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", model)
     messages = [{"role": "user", "content": PARSER_PROMPT}]
@@ -754,6 +898,7 @@ def eval_self_healing_code(
         options={"temperature": 0.2, "num_predict": 2048, "num_ctx": num_ctx},
         think=think,
         base_url=base_url,
+        api=api,
     )
     c1 = extract_code(t1["content"])
     r1 = run_code_tests(c1, PARSER_UNITTESTS, 10, f"{safe_name}_t1")
@@ -773,6 +918,7 @@ def eval_self_healing_code(
             options={"temperature": 0.2, "num_predict": 2048, "num_ctx": num_ctx},
             think=think,
             base_url=base_url,
+            api=api,
         )
         c2 = extract_code(t2["content"])
         r2 = run_code_tests(c2, PARSER_UNITTESTS, 10, f"{safe_name}_t2")
@@ -871,6 +1017,7 @@ def eval_math_verification(
     think: Optional[bool] = None,
     base_url: Optional[str] = None,
     num_ctx: int = 4096,
+    api: str = "ollama",
 ) -> dict:
     safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", model)
     messages = [{"role": "user", "content": MATH_PROMPT}]
@@ -880,6 +1027,7 @@ def eval_math_verification(
         options={"temperature": 0.1, "num_predict": 2048, "num_ctx": num_ctx},
         think=think,
         base_url=base_url,
+        api=api,
     )
     code = extract_code(t1["content"])
     r1 = run_code_tests(code, MATH_UNITTESTS, 5, f"{safe_name}_math")
@@ -932,7 +1080,13 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--base-url",
         default=None,
-        help="Ollama base URL (default: $OLLAMA_HOST or http://localhost:11434).",
+        help="Backend base URL (default: $OLLAMA_HOST or http://localhost:11434).",
+    )
+    parser.add_argument(
+        "--api",
+        choices=["ollama", "openai"],
+        default="ollama",
+        help="Backend protocol: ollama (/api/chat) or openai (/v1/chat/completions for llama-server/vLLM/LM Studio).",
     )
     parser.add_argument(
         "--think",
@@ -999,28 +1153,28 @@ def main(argv: Optional[list[str]] = None) -> int:
     think_flag = None if args.think == "auto" else (args.think == "true")
 
     if args.list_models:
-        models = list_local_ollama_models(base_url)
-        print(f"Installed Ollama models at {base_url}:")
+        models = list_local_ollama_models(base_url, api=args.api)
+        print(f"Installed models at {base_url} ({args.api}):")
         for m in models:
             print(f"  - {m}")
         return 0
 
     models = args.models
     try:
-        installed = list_local_ollama_models(base_url)
+        installed = list_local_ollama_models(base_url, api=args.api)
     except Exception as e:
-        print(f"[!] Could not reach Ollama at {base_url}: {e}", file=sys.stderr)
-        print("    Start Ollama or pass --base-url http://<host>:11434", file=sys.stderr)
+        print(f"[!] Could not reach {args.api} backend at {base_url}: {e}", file=sys.stderr)
+        print("    Start your server or pass --base-url http://<host>:<port>", file=sys.stderr)
         return 1
 
     if not models:
         models = installed
         if not models:
-            print(f"[!] No models found at {base_url}. Pull one first (e.g. `ollama pull gemma4:e2b`).", file=sys.stderr)
+            print(f"[!] No models found at {base_url}. Pull or load one first.", file=sys.stderr)
             return 1
 
     print("=" * 72)
-    print(f"LOCAL AGENTIC BENCHMARK SUITE | endpoint={base_url} | think={args.think} | ctx={args.num_ctx} | runs={args.runs} | tool_temp={args.tool_temp}")
+    print(f"LOCAL AGENTIC BENCHMARK SUITE | api={args.api} | endpoint={base_url} | think={args.think} | ctx={args.num_ctx} | runs={args.runs} | tool_temp={args.tool_temp}")
     print("=" * 72)
 
     summary = []
@@ -1033,6 +1187,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             num_ctx=args.num_ctx,
             runs=args.runs,
             temperature=args.tool_temp,
+            api=args.api,
         )
         print(
             f"  [Track 1A - Action Tools]    {tc['action_passed']}/{tc['action_total']} ({tc['action_score_pct']}%) | "
@@ -1042,10 +1197,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             f"  [Track 1B - No-Call Restr.]  {tc['abstention_passed']}/{tc['abstention_total']} ({tc['abstention_score_pct']}%)"
         )
 
-        sh = eval_self_healing_code(m, think=think_flag, base_url=base_url, num_ctx=args.num_ctx)
+        sh = eval_self_healing_code(m, think=think_flag, base_url=base_url, num_ctx=args.num_ctx, api=args.api)
         print(f"  [Track 2 - Self-Healing]     Turn 1: {sh['turn1_passed']}/10 -> Turn 2: {sh['turn2_passed']}/10 (Delta: +{sh['healed_delta']}) | TPS: {sh['turn1_tps']}")
 
-        mv = eval_math_verification(m, think=think_flag, base_url=base_url, num_ctx=args.num_ctx)
+        mv = eval_math_verification(m, think=think_flag, base_url=base_url, num_ctx=args.num_ctx, api=args.api)
         print(f"  [Track 3 - Bayesian Math]    Score: {mv['passed']}/5 ({mv['score_pct']}%) | TPS: {mv['tps']}")
 
         composite = round((tc["score_pct"] + sh["turn2_score_pct"] + mv["score_pct"]) / 3.0, 1)
@@ -1053,6 +1208,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"  [Composite / Verdict]        {composite}% -> {verdict}")
         summary.append({
             "model": m,
+            "api": args.api,
             "endpoint": base_url,
             "think": args.think,
             "num_ctx": args.num_ctx,
@@ -1064,7 +1220,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             "composite_agent_score": composite,
             "offload_verdict": verdict,
         })
-        if idx < len(models) - 1:
+        if args.api == "ollama" and idx < len(models) - 1:
             _unload_model(m, base_url)
 
     out_path = Path(args.output) if args.output else (RESULTS_DIR / f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")

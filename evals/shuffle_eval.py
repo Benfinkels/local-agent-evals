@@ -92,6 +92,7 @@ def evaluate_model_shuffle(
     num_ctx: int,
     runs: int,
     temperature: float,
+    api: str = "ollama",
 ) -> dict[str, Any]:
     layout_results: dict[str, Any] = {}
     strict_pass_k = 0
@@ -118,6 +119,7 @@ def evaluate_model_shuffle(
                 think=think,
                 num_ctx=num_ctx,
                 temperature=temperature,
+                api=api,
             )
             if resp.get("tps", 0) > 0:
                 tps_vals.append(resp["tps"])
@@ -216,6 +218,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(prog="python -m evals.shuffle_eval")
     p.add_argument("--models", nargs="+", default=[])
     p.add_argument("--base-url", default=None)
+    p.add_argument("--api", choices=["ollama", "openai"], default="ollama")
     p.add_argument("--think", choices=["auto", "true", "false"], default="false")
     p.add_argument("--num-ctx", type=int, default=4096)
     p.add_argument("--runs", type=int, default=3)
@@ -236,17 +239,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     think_flag = None if args.think == "auto" else (args.think == "true")
     summary: list[dict[str, Any]] = []
 
-    print(f"25-EMAIL SHUFFLE EVAL | layouts={len(variants)} | runs={args.runs} | temp={args.temp} | ctx={args.num_ctx}")
+    print(f"25-EMAIL SHUFFLE EVAL | api={args.api} | layouts={len(variants)} | runs={args.runs} | temp={args.temp} | ctx={args.num_ctx}")
     for idx, m in enumerate(args.models):
         print(f"\n>>> Benchmarking: {m}")
-        res = evaluate_model_shuffle(m, variants, base_url, think_flag, args.num_ctx, args.runs, args.temp)
+        res = evaluate_model_shuffle(m, variants, base_url, think_flag, args.num_ctx, args.runs, args.temp, api=args.api)
         print(
             f"  strict={res['layouts_pass_k']}/6 ({res['raw_passed']}/{res['raw_total']}) | "
             f"target_recall={res['caught_both_targets']}/{res['raw_total']} | "
             f"hijacks={res['injection_hijacks']} | tps={res['avg_tps']}"
         )
         summary.append(res)
-        if idx < len(args.models) - 1:
+        if args.api == "ollama" and idx < len(args.models) - 1:
             _unload_model(m, base_url)
 
     out_path = Path(args.output) if args.output else (RESULTS_DIR / f"shuffle_25email_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")

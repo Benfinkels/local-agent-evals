@@ -10,15 +10,19 @@ Most benchmarks grade chat vibes or trivia. This zero-dependency Python harness 
 
 ![8GB GPU Tool Calling vs. No-Call Restraint](docs/charts/ep1_action_vs_restraint.png)
 
-## Quick Start (Test Your Own Ollama Models in 60 Seconds)
+## Quick Start (Ollama, `llama-server`, vLLM, or LM Studio in 60 Seconds)
 
 ```bash
 git clone https://github.com/Benfinkels/local-agent-evals.git
 cd local-agent-evals
-python -m evals.runner --models ministral-3:8b nemotron-3-nano:4b --think false --runs 3 --tool-temp 0.2
+# Ollama (default):
+python -m evals.runner --models granite4.2:8b qwen3.5:9b --think false --runs 3 --tool-temp 0.2
+# llama.cpp (llama-server), LM Studio, vLLM, or SGLang (OpenAI-compatible /v1):
+python -m evals.runner --api openai --base-url http://127.0.0.1:8080 --models my-model --think false --runs 3 --tool-temp 0.2
 ```
 
 - Uses **Python standard library only** to run live evals (no SDK dependencies required).
+- Works with both **Ollama (`/api/chat`)** and any **OpenAI-compatible local server (`--api openai` → `/v1/chat/completions`, including `llama-server`, `LM Studio`, `vLLM`, `SGLang`)**.
 - Point at a remote Ollama box with `--base-url http://<host>:11434` (or `$OLLAMA_HOST`).
 - Measure consistency across repeated trials with `--runs 3 --tool-temp 0.2`, and compare thinking modes with `--think auto | true | false`.
 - Prints a copy-pasteable Markdown leaderboard and writes JSON to `results/run_<timestamp>.json` (never auto-pulls models or overwrites committed baselines).
@@ -29,6 +33,28 @@ python -m evals.runner --models ministral-3:8b nemotron-3-nano:4b --think false 
 pip install -r requirements.txt
 PYTHONPATH=. pytest tests/ -v
 ```
+
+---
+
+## 24GB RTX 4090 Showdown: `qwen3.8:27b` vs. `gemma4:26B` vs. `inkling-2-mini` (`Ollama v0.40.18`)
+
+Head-to-head across all three deterministic suites (`runner.py` tools + restraint + 2-turn code + math, `briefing_eval.py` 12-case `pass^3`, and `shuffle_eval.py` 6-layout 25-email prompt-injection shuffle — `runs=3`, `temp=0.2`, `ctx=4096`, `100% GPU` on a single 24GB RTX 4090; raw telemetry in [`showdown_24gb_runner_nov2026.json`](results/showdown_24gb_runner_nov2026.json), [`showdown_24gb_briefing_nov2026.json`](results/showdown_24gb_briefing_nov2026.json), [`showdown_24gb_shuffle_nov2026.json`](results/showdown_24gb_shuffle_nov2026.json)):
+
+| Model (RTX 4090 24GB) | Size | Speed | `runner.py` Composite | Tools / Restraint / Code / Math | Briefing (`pass^3`) | 25-Email Shuffle | Hijacks |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`qwen3.8:27b`** (`think=false`) | 17 GB | 112–126 t/s | **100.0%** | `21/21` · `15/15` · `8→10/10` · `5/5` | **12/12** (`36/36`) | **6/6** (`18/18`) | **0** |
+| **`gemma4:26B`** (`think=false`) | 17 GB | **161–170 t/s** | **93.3%** | `21/21` · `15/15` · `8→8/10` · `5/5` | **12/12** (`36/36`) | **6/6** (`18/18`) | **0** |
+| **`inkling-2-mini`** (`think=auto`) | 18 GB | 60–63 t/s | 30.6% *(Starved)* | `18/21` · `15/15` · `0→0/10` · `0/5` | 10/12 (`33/36`, `0` FP) | **6/6** (`18/18`) | **0** |
+| **`inkling-2-mini`** (`think=false`) | 18 GB | 56–65 t/s | 65.7% | `20/21` · `15/15` · `0→0/10` · `5/5` | 2/12 (`HTTP 500` loop) | 1/6 (`3/18`) | 0 |
+
+- **`qwen3.8:27b` swept 100% across every single check** (`90/90` across all 3 suites) at `112–126 t/s` with `think=false`.
+- **`gemma4:26B` hit `161–170 t/s`** and matched `12/12` briefing + `6/6` shuffle (`0` hijacks), dropping only 2 points on Turn-2 regex code self-healing (`8→8/10`).
+- **`inkling-2-mini` has a thinking-mode catch-22 on Ollama `v0.40.18`:** With `think=auto` it nailed `6/6` (`18/18`, `0` hijacks) on the 25-email shuffle and `10/12` (`0` FP) on the morning brief, but ran at half the speed (`60 t/s`) and starved the 2,048-token code/math caps to `0/10` and `0/5` (+ 3 extra unwanted tool calls). Forcing `think=false` broke structured JSON (`2/12`) and triggered `HTTP 500: prediction aborted, token repeat limit reached`.
+
+### Ollama `num_ctx` Reload vs. Multi-Prompt Cache Benchmark ([`evals/ctx_reload_eval.py`](evals/ctx_reload_eval.py))
+Verified on RTX 4090 (`Ollama v0.40.11`, [`results/ctx_reload_4090_nov2026.json`](results/ctx_reload_4090_nov2026.json)):
+- **Switching `num_ctx` (`2048 <-> 8192`) still forces a full model reload on 4/4 switches:** `2,468 ms` avg reload on `phi4-mini` and `4,996 ms` on `gemma4:26B` (vs. `2.2–2.6 ms` load when fixed).
+- **Fixed `num_ctx=8192` with 3 rotating ~2.2k-token system prompts hit cache on pass 2:** `6.5–6.7 ms` prefill on `phi4-mini` and `185–218 ms` on `gemma4:26B` (`2.1 ms` load) — showing newer Ollama `0.40.x` caches multiple system prompts as long as `num_ctx` never changes.
 
 ---
 

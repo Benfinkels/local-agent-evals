@@ -553,7 +553,53 @@ def call_ollama_json(
     temperature: float = 0.2,
     keep_alive: str = "5m",
     timeout: int = 180,
+    api: str = "ollama",
 ) -> dict[str, Any]:
+    if api == "openai":
+        norm = normalize_ollama_url(base_url)
+        endpoint = f"{norm if norm.endswith('/v1') else norm + '/v1'}/chat/completions"
+        payload_oa: dict[str, Any] = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user_json},
+            ],
+            "stream": False,
+            "response_format": {"type": "json_object"},
+            "temperature": temperature,
+            "max_tokens": 1024,
+        }
+        if think is not None:
+            payload_oa["chat_template_kwargs"] = {"enable_thinking": bool(think)}
+        headers = {"Content-Type": "application/json"}
+        key = os.environ.get("OPENAI_API_KEY")
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        t0 = time.perf_counter()
+        try:
+            try:
+                req = urllib.request.Request(endpoint, data=json.dumps(payload_oa).encode("utf-8"), headers=headers)
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as he:
+                err_body = he.read().decode("utf-8", errors="replace")
+                if he.code == 400 and "chat_template_kwargs" in payload_oa:
+                    payload_oa.pop("chat_template_kwargs", None)
+                    req = urllib.request.Request(endpoint, data=json.dumps(payload_oa).encode("utf-8"), headers=headers)
+                    with urllib.request.urlopen(req, timeout=timeout) as resp:
+                        data = json.loads(resp.read().decode("utf-8"))
+                else:
+                    raise RuntimeError(f"HTTP {he.code}: {err_body[:200]}") from he
+            elapsed = time.perf_counter() - t0
+            msg = (data.get("choices") or [{}])[0].get("message") or {}
+            content = msg.get("content", "") or ""
+            usage = data.get("usage") or {}
+            eval_count = usage.get("completion_tokens", 0) or 0
+            timings = data.get("timings") or {}
+            tps = timings.get("predicted_per_second") or (eval_count / max(elapsed, 0.01))
+            return {"ok": True, "content": content, "elapsed_sec": round(elapsed, 2), "tps": round(float(tps), 2)}
+        except Exception as e:
+            return {"ok": False, "content": "", "error": str(e), "elapsed_sec": round(time.perf_counter() - t0, 2), "tps": 0.0}
     payload: dict[str, Any] = {
         "model": model,
         "messages": [
@@ -611,7 +657,7 @@ def call_ollama_json(
 def _load_minimax_key() -> str:
     if os.environ.get("MINIMAX_API_KEY"):
         return os.environ["MINIMAX_API_KEY"].strip()
-    env_file = Path("/home/alfred/.env")
+    env_file = Path.home() / ".env"
     if env_file.exists():
         for line in env_file.read_text(encoding="utf-8", errors="ignore").splitlines():
             line = line.strip()
@@ -749,8 +795,9 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         prog="python -m evals.briefing_eval",
         description="Episode 2: Private Morning-Briefing Agent Eval (Inbox Triage, Dropped Ball, CRM News).",
     )
-    p.add_argument("--models", nargs="+", default=[], help="Local Ollama model tags to evaluate.")
-    p.add_argument("--base-url", default=None, help="Ollama URL (default: $OLLAMA_HOST or http://localhost:11434).")
+    p.add_argument("--models", nargs="+", default=[], help="Local model tags to evaluate.")
+    p.add_argument("--base-url", default=None, help="Backend URL (default: $OLLAMA_HOST or http://localhost:11434).")
+    p.add_argument("--api", choices=["ollama", "openai"], default="ollama", help="API protocol: ollama (/api/chat) or openai (/v1/chat/completions for llama-server/vLLM/LM Studio).")
     p.add_argument("--think", choices=["auto", "true", "false"], default="false")
     p.add_argument("--num-ctx", type=int, default=4096)
     p.add_argument("--runs", type=int, default=3, help="Repeated runs per case for pass^k (default: 3).")
@@ -795,7 +842,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         res = evaluate_model_briefing(
             m,
             lambda sp, uj, _m=m: call_ollama_json(
-                _m, sp, uj, base_url=base_url, think=think_flag, num_ctx=args.num_ctx, temperature=args.temp
+                _m, sp, uj, base_url=base_url, think=think_flag, num_ctx=args.num_ctx, temperature=args.temp, api=args.api
             ),
             cases,
             runs=args.runs,
@@ -805,7 +852,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             f"Raw: {res['raw_passed']}/{res['raw_total']} | FP: {res['false_positives']} | Hijacks: {res['injection_hijacks']} | TPS: {res['avg_tps']}"
         )
         summary.append(res)
-        if idx < len(args.models) - 1:
+        if args.api == "ollama" and idx < len(args.models) - 1:
             _unload_model(m, base_url)
 
     out_path = Path(args.output) if args.output else (RESULTS_DIR / f"briefing_eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")

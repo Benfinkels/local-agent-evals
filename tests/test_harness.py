@@ -339,3 +339,70 @@ def test_extra_unwanted_tool_call_is_rejected():
     assert case_map["12_validator_error_self_repair"]["passed"] is False
 
 
+def test_openai_compatible_backend_parses_tool_calls_and_timings():
+    """Verify --api openai (llama-server / vLLM / LM Studio) normalizes tool_calls, tool_call_id, and timings."""
+    from unittest.mock import patch
+    from evals.runner import ollama_chat, parse_args
+    from evals.briefing_eval import call_ollama_json
+
+    args = parse_args(["--api", "openai", "--base-url", "http://127.0.0.1:8080", "--models", "qwen3.8-27b"])
+    assert args.api == "openai"
+
+    captured = []
+
+    class FakeResp:
+        def __init__(self, body: dict):
+            self._body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return json.dumps(self._body).encode("utf-8")
+
+    def fake_urlopen(req, timeout=None):
+        payload = json.loads(req.data.decode("utf-8"))
+        captured.append((req.full_url, payload))
+        if len(captured) == 1:
+            return FakeResp({
+                "choices": [{
+                    "message": {
+                        "content": "",
+                        "tool_calls": [{
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {"name": "run_pytest", "arguments": "{\"target_path\": \"tests/t.py\", \"maxfail\": 1, \"verbose\": true}"},
+                        }],
+                    }
+                }],
+                "usage": {"completion_tokens": 18},
+                "timings": {"predicted_per_second": 94.5},
+            })
+        return FakeResp({
+            "choices": [{"message": {"content": "{\"action_items\": []}"}}],
+            "usage": {"completion_tokens": 6},
+            "timings": {"predicted_per_second": 110.0},
+        })
+
+    history = [
+        {"role": "user", "content": "Fix call"},
+        {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "run_pytest", "arguments": {"target_path": "x"}}}]},
+        {"role": "tool", "content": "ValidationError"},
+    ]
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        res = ollama_chat("qwen3.8-27b", history, think=False, base_url="http://127.0.0.1:8080", api="openai")
+        jres = call_ollama_json("qwen3.8-27b", "Return JSON", "[]", base_url="http://127.0.0.1:8080/v1", think=False, api="openai")
+
+    assert res["ok"] is True and res["tps"] == 94.5
+    assert res["tool_calls"][0]["function"]["arguments"] == {"target_path": "tests/t.py", "maxfail": 1, "verbose": True}
+    assert captured[0][0] == "http://127.0.0.1:8080/v1/chat/completions"
+    assert captured[0][1]["messages"][2]["tool_call_id"] == "call_0"
+    assert captured[0][1]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert jres["ok"] is True and jres["tps"] == 110.0 and captured[1][0] == "http://127.0.0.1:8080/v1/chat/completions"
+    assert captured[1][1]["response_format"] == {"type": "json_object"}
+
+
+
