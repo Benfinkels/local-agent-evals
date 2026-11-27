@@ -14,6 +14,8 @@ from evals.runner import (
     run_code_tests,
     PARSER_UNITTESTS,
     MATH_UNITTESTS,
+    grade_json_repair,
+    JSON_REPAIR_EXPECTED,
 )
 
 
@@ -21,6 +23,61 @@ def test_extract_code_strips_markdown():
     raw = "Here is the solution:\n```python\ndef foo():\n    return 42\n```"
     assert extract_code(raw) == "def foo():\n    return 42"
 
+
+def test_json_repair_reference_solution_scores_100():
+    output = json.dumps(JSON_REPAIR_EXPECTED)
+    result = grade_json_repair(output)
+
+    assert result["passed"] == 1
+    assert result["score_pct"] == 100.0
+    assert result["valid_json"] is True
+    assert result["schema_valid"] is True
+
+
+def test_json_repair_rejects_hallucinated_tracking_number():
+    output = dict(JSON_REPAIR_EXPECTED)
+    output["tracking_number"] = "TRACK-99999"
+
+    result = grade_json_repair(json.dumps(output))
+
+    assert result["score_pct"] == 0.0
+    assert result["matches_reference"] is False
+
+
+def test_json_repair_rejects_wrong_type():
+    output = dict(JSON_REPAIR_EXPECTED)
+    output["quantity"] = "2"
+
+    result = grade_json_repair(json.dumps(output))
+
+    assert result["score_pct"] == 0.0
+    assert result["schema_valid"] is False
+
+
+def test_json_repair_rejects_extra_key():
+    output = dict(JSON_REPAIR_EXPECTED)
+    output["unexpected"] = "extra"
+
+    result = grade_json_repair(json.dumps(output))
+
+    assert result["score_pct"] == 0.0
+    assert result["schema_valid"] is False
+
+def test_json_repair_rejects_missing_key():
+    output = dict(JSON_REPAIR_EXPECTED)
+    del output["delivery_date"]
+
+    result = grade_json_repair(json.dumps(output))
+
+    assert result["score_pct"] == 0.0
+    assert result["schema_valid"] is False
+
+def test_json_repair_rejects_malformed_json_cleanly():
+    result = grade_json_repair("{'customer_name': 'Ava Chen',")
+
+    assert result["passed"] == 0
+    assert result["score_pct"] == 0.0
+    assert result["valid_json"] is False
 
 def test_hardware_parser_verifier_passes_reference_solution():
     ref_code = r"""

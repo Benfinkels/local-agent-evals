@@ -1042,6 +1042,119 @@ def eval_math_verification(
     }
 
 
+# ============================================================================
+# TRACK 4: STRICT JSON REPAIR AND STRUCTURED EXTRACTION
+# ============================================================================
+
+JSON_REPAIR_PROMPT = """Repair the malformed JSON record below and return the
+corrected data as one valid JSON object.
+
+Malformed record:
+{
+    'customer_name': 'Ava Chen',
+    'order_id': 'ORD-1042',
+    'item': 'USB-C hub',
+    'quantity': '2',
+    'delivery_date': '2026-11-30',
+    'tracking_number':
+}
+
+Required schema (exactly these keys):
+{
+    "customer_name": string,
+    "order_id": string,
+    "item": string,
+    "quantity": integer,
+    "delivery_date": string or null,
+    "tracking_number": string or null
+}
+
+Rules:
+- Convert quantity from a numeric string to an integer.
+- The tracking number is missing. Return JSON null for it.
+- Do not invent or infer missing information.
+- Do not add or remove keys.
+- Return ONLY valid JSON. No Markdown, code fences, or explanations.
+"""
+
+JSON_REPAIR_EXPECTED = {
+    "customer_name": "Ava Chen",
+    "order_id": "ORD-1042",
+    "item": "USB-C hub",
+    "quantity": 2,
+    "delivery_date": "2026-11-30",
+    "tracking_number": None,
+}
+
+
+def grade_json_repair(output: str) -> dict:
+    """Grade JSON syntax, exact schema, types, and reference values."""
+    try:
+        actual = json.loads(output)
+    except (json.JSONDecodeError, TypeError):
+        return {
+            "passed": 0,
+            "total": 1,
+            "score_pct": 0.0,
+            "valid_json": False,
+            "schema_valid": False,
+            "matches_reference": False,
+        }
+
+    expected = JSON_REPAIR_EXPECTED
+    exact_keys = isinstance(actual, dict) and set(actual) == set(expected)
+
+    exact_types = exact_keys and all(
+        type(actual[key]) is type(expected[key])
+        for key in expected
+    )
+
+    matches_reference = (
+        exact_types
+        and all(actual[key] == expected[key] for key in expected)
+    )
+
+    passed = int(matches_reference)
+
+    return {
+        "passed": passed,
+        "total": 1,
+        "score_pct": 100.0 if passed else 0.0,
+        "valid_json": True,
+        "schema_valid": bool(exact_types),
+        "matches_reference": bool(matches_reference),
+    }
+
+
+def eval_json_repair(
+    model: str,
+    think: Optional[bool] = None,
+    base_url: Optional[str] = None,
+    num_ctx: int = 4096,
+    api: str = "ollama",
+) -> dict:
+    """Run the deterministic Track 4 JSON repair evaluation."""
+    response = ollama_chat(
+        model,
+        [{"role": "user", "content": JSON_REPAIR_PROMPT}],
+        options={"temperature": 0.0, "num_predict": 512, "num_ctx": num_ctx},
+        think=think,
+        base_url=base_url,
+        api=api,
+    )
+
+    if not response["ok"]:
+        result = grade_json_repair("")
+        result["error"] = response["error"]
+    else:
+        result = grade_json_repair(response["content"])
+
+    result["elapsed_sec"] = response["elapsed_sec"]
+    result["tps"] = response["tps"]
+    result["starved"] = response["starved"]
+    return result
+
+
 def classify_offload_readiness(tc: dict, sh: dict, mv: dict, composite: float) -> str:
     """Classify whether a local model can run unattended without paying a frontier babysitter tax."""
     starved = bool(tc.get("starved") or sh.get("turn1_starved") or sh.get("turn2_starved") or mv.get("starved"))
@@ -1117,6 +1230,13 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         default=None,
         help="Path to write JSON results (default: results/run_<timestamp>.json).",
     )
+
+    parser.add_argument(
+        "--track4",
+        action="store_true",
+        help="Run Track 4: strict JSON repair and structured extraction.",
+    )
+
     parser.add_argument(
         "--list-models",
         action="store_true",
@@ -1126,24 +1246,61 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
 
 def format_markdown_table(summary: list[dict]) -> str:
-    lines = [
-        "| Model | Action Tools | No-Call Restraint | Extra Calls | Code (T1->T2) | Math | Starved? | Composite | Verdict |",
-        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |",
-    ]
+    has_track4 = any(row.get("json_repair") is not None for row in summary)
+    if has_track4:
+        lines = [
+            "| Model | Action Tools | No-Call Restraint | Extra Calls | Code (T1->T2) | Math | JSON Repair | Starved? | Composite | Verdict |",
+            "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |",
+        ]
+    else:
+        lines = [
+            "| Model | Action Tools | No-Call Restraint | Extra Calls | Code (T1->T2) | Math | Starved? | Composite | Verdict |",
+            "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |",
+        ]
     for row in summary:
         tc = row["tool_calling"]
         sh = row["self_healing"]
         mv = row["bayesian_math"]
-        starved = "Yes" if (tc.get("starved") or sh["turn1_starved"] or sh["turn2_starved"] or mv["starved"]) else "No"
-        verdict = row.get("offload_verdict") or classify_offload_readiness(tc, sh, mv, row["composite_agent_score"])
-        act_str = f"{tc['action_passed']}/{tc['action_total']} ({tc['action_score_pct']}%)" if "action_passed" in tc else f"{tc['passed']}/{tc['total']}"
-        abs_str = f"{tc['abstention_passed']}/{tc['abstention_total']} ({tc['abstention_score_pct']}%)" if "abstention_passed" in tc else "n/a"
+        j4 = row.get("json_repair")
+
+        starved = "Yes" if (
+            tc.get("starved")
+            or sh["turn1_starved"]
+            or sh["turn2_starved"]
+            or mv["starved"]
+            or (j4 and j4.get("starved"))
+        ) else "No"
+
+        verdict = row.get("offload_verdict") or classify_offload_readiness(
+            tc, sh, mv, row["composite_agent_score"]
+        )
+
+        act_str = (
+            f"{tc['action_passed']}/{tc['action_total']} ({tc['action_score_pct']}%)"
+            if "action_passed" in tc else f"{tc['passed']}/{tc['total']}"
+        )
+        abs_str = (
+            f"{tc['abstention_passed']}/{tc['abstention_total']} ({tc['abstention_score_pct']}%)"
+            if "abstention_passed" in tc else "n/a"
+        )
         extra_str = str(tc.get("extra_calls_rejected", 0))
-        lines.append(
+
+        line = (
             f"| `{row['model']}` | {act_str} | {abs_str} | {extra_str} | "
             f"{sh['turn1_passed']}/10 -> {sh['turn2_passed']}/10 (+{sh['healed_delta']}) | "
-            f"{mv['passed']}/{mv['total']} ({mv['score_pct']}%) | {starved} | **{row['composite_agent_score']}%** | {verdict} |"
+            f"{mv['passed']}/{mv['total']} ({mv['score_pct']}%) |"
         )
+
+        if has_track4:
+            json_str = (
+                f"{j4['passed']}/{j4['total']} ({j4['score_pct']}%)"
+                if j4 else "n/a"
+            )
+            line += f" {json_str} |"
+
+        line += f" {starved} | **{row['composite_agent_score']}%** | {verdict} |"
+        lines.append(line)
+
     return "\n".join(lines)
 
 
@@ -1203,6 +1360,22 @@ def main(argv: Optional[list[str]] = None) -> int:
         mv = eval_math_verification(m, think=think_flag, base_url=base_url, num_ctx=args.num_ctx, api=args.api)
         print(f"  [Track 3 - Bayesian Math]    Score: {mv['passed']}/5 ({mv['score_pct']}%) | TPS: {mv['tps']}")
 
+        j4 = None
+        if args.track4:
+            j4 = eval_json_repair(
+                m,
+                think=think_flag,
+                base_url=base_url,
+                num_ctx=args.num_ctx,
+                api=args.api,
+            )
+            print(
+                f"  [Track 4 - JSON Repair]      "
+                f"Score: {j4['passed']}/{j4['total']} "
+                f"({j4['score_pct']}%)"
+            )
+
+
         composite = round((tc["score_pct"] + sh["turn2_score_pct"] + mv["score_pct"]) / 3.0, 1)
         verdict = classify_offload_readiness(tc, sh, mv, composite)
         print(f"  [Composite / Verdict]        {composite}% -> {verdict}")
@@ -1217,6 +1390,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             "tool_calling": tc,
             "self_healing": sh,
             "bayesian_math": mv,
+            "json_repair": j4,
             "composite_agent_score": composite,
             "offload_verdict": verdict,
         })
